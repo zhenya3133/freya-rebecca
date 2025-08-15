@@ -1,0 +1,14 @@
+# Node
+node_modules
+npm-debug.log*
+# Env
+.env
+.env.*
+apps/web/.env.local
+# Build
+.next
+dist
+out
+# OS
+.DS_Store
+Thumbs.db
