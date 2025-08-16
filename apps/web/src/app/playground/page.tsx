@@ -1,115 +1,166 @@
 // apps/web/src/app/playground/page.tsx
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-type KPI = { name: string; target: number; unit?: string };
+type RecentItem = {
+  initiative_id: string;
+  goal: string;
+  kpi_json: any;
+  budget_json: any;
+  deadline: string | null;
+  status: string;
+  created_at: string;
+  artifact_id: string | null;
+  type: string | null;
+  title: string | null;
+  content_preview: string | null;
+  cost_tokens: number | null;
+  artifact_created_at: string | null;
+};
 
-export default function PlaygroundPage() {
+export default function Playground() {
   const [goal, setGoal] = useState("Сделай план запуска ИИ-агентов для мастера маникюра в Минске");
-  const [leads, setLeads] = useState(5);
-  const [budgetUsd, setBudgetUsd] = useState(20);
-  const [budgetTokens, setBudgetTokens] = useState(500000);
   const [deadline, setDeadline] = useState("2025-09-15");
-
+  const [tokens, setTokens] = useState(500000);
+  const [usd, setUsd] = useState(20);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [initiative, setInitiative] = useState<any>(null);
-  const [plan, setPlan] = useState<string>("");
+  const [result, setResult] = useState<any>(null);
+  const [recent, setRecent] = useState<RecentItem[]>([]);
+  const [err, setErr] = useState<string | null>(null);
 
-  async function submit() {
-    setLoading(true);
-    setError(null);
-    setInitiative(null);
-    setPlan("");
+  const canSubmit = useMemo(() => goal.trim().length > 0 && !loading, [goal, loading]);
 
-    const kpi: KPI[] = [{ name: "Leads", target: leads, unit: "count" }];
-
+  async function refreshRecent() {
     try {
-      const res = await fetch("/api/freya/initiative", {
+      const r = await fetch("/api/initiatives/recent", { cache: "no-store" });
+      const j = await r.json();
+      setRecent(j.items ?? []);
+    } catch (e: any) {
+      console.error(e);
+    }
+  }
+
+  useEffect(() => {
+    refreshRecent();
+  }, []);
+
+  async function run() {
+    setLoading(true);
+    setErr(null);
+    setResult(null);
+    try {
+      const body = {
+        goal,
+        kpi: [{ name: "Leads", target: 5, unit: "count" }],
+        budget: { tokens, usd },
+        deadline,
+      };
+      const r = await fetch("/api/freya/initiative", {
         method: "POST",
         headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify({
-          goal,
-          kpi,
-          budget: { usd: budgetUsd, tokens: budgetTokens },
-          deadline
-        })
+        body: JSON.stringify(body),
       });
-
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`HTTP ${res.status}: ${txt}`);
+      const j = await r.json();
+      if (!r.ok) {
+        setErr(`Ошибка: ${j?.step ?? "unknown"} -> ${j?.error ?? "no message"}`);
+      } else {
+        setResult(j);
+        refreshRecent();
       }
-
-      const data = await res.json();
-      setInitiative(data.initiative);
-      setPlan(data.rebecca?.plan ?? "");
     } catch (e: any) {
-      setError(String(e?.message ?? e));
+      setErr(String(e?.message ?? e));
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div style={{ maxWidth: 920, margin: "24px auto", padding: 16, fontFamily: "system-ui, sans-serif" }}>
-      <h1>Freya Playground</h1>
-      <p style={{ color: "#666" }}>Введи цель → Фрея создаст инициативу и попросит Ребекку выдать план.</p>
+    <main style={{ maxWidth: 980, margin: "40px auto", padding: 16 }}>
+      <h1>Freya → Rebecca Playground</h1>
 
-      <label style={{ display: "block", marginTop: 12 }}>
-        Цель
-        <textarea
-          value={goal}
-          onChange={(e) => setGoal(e.target.value)}
-          style={{ width: "100%", minHeight: 90, marginTop: 6 }}
-        />
-      </label>
+      <section style={{ marginTop: 16, padding: 16, border: "1px solid #ddd", borderRadius: 8 }}>
+        <h3>Запуск инициативы</h3>
+        <label>
+          Цель:
+          <textarea
+            value={goal}
+            onChange={(e) => setGoal(e.target.value)}
+            rows={3}
+            style={{ width: "100%", marginTop: 8 }}
+          />
+        </label>
 
-      <div style={{ display: "flex", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
-        <label>
-          KPI Leads
-          <input type="number" value={leads} onChange={(e) => setLeads(Number(e.target.value))} style={{ width: 120, marginLeft: 8 }} />
-        </label>
-        <label>
-          Бюджет, $ 
-          <input type="number" value={budgetUsd} onChange={(e) => setBudgetUsd(Number(e.target.value))} style={{ width: 120, marginLeft: 8 }} />
-        </label>
-        <label>
-          Бюджет, tokens 
-          <input type="number" value={budgetTokens} onChange={(e) => setBudgetTokens(Number(e.target.value))} style={{ width: 140, marginLeft: 8 }} />
-        </label>
-        <label>
-          Дедлайн
-          <input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} style={{ marginLeft: 8 }} />
-        </label>
-      </div>
+        <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+          <label style={{ flex: 1 }}>
+            Дедлайн (YYYY-MM-DD)
+            <input value={deadline} onChange={(e) => setDeadline(e.target.value)} style={{ width: "100%" }} />
+          </label>
+          <label style={{ width: 160 }}>
+            Tokens
+            <input
+              type="number"
+              value={tokens}
+              onChange={(e) => setTokens(Number(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ width: 160 }}>
+            USD
+            <input
+              type="number"
+              value={usd}
+              onChange={(e) => setUsd(Number(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </label>
+        </div>
 
-      <div style={{ marginTop: 16 }}>
-        <button onClick={submit} disabled={loading} style={{ padding: "8px 16px" }}>
-          {loading ? "Отправляю..." : "Отправить Фрее"}
+        <button onClick={run} disabled={!canSubmit} style={{ marginTop: 14 }}>
+          {loading ? "Запускаем..." : "Запустить Freya → Rebecca"}
         </button>
-      </div>
 
-      {error && (
-        <pre style={{ color: "crimson", marginTop: 16, whiteSpace: "pre-wrap" }}>
-          Ошибка: {error}
-        </pre>
-      )}
+        {err && (
+          <div style={{ marginTop: 12, color: "#b00020" }}>
+            <b>{err}</b>
+          </div>
+        )}
 
-      {initiative && (
-        <div style={{ marginTop: 20 }}>
-          <h3>Инициатива</h3>
-          <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(initiative, null, 2)}</pre>
+        {result && (
+          <div style={{ marginTop: 16 }}>
+            <h4>Результат</h4>
+            <div>initiative_id: <code>{result.initiative?.id}</code></div>
+            <div>artifact_id: <code>{result.rebecca?.artifact_id ?? "—"}</code></div>
+            <div>model: <code>{result.rebecca?.model ?? "n/a"}</code></div>
+            <div>tokens: <code>{result.rebecca?.tokens ?? "n/a"}</code></div>
+            <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 12, borderRadius: 6, marginTop: 8 }}>
+              {result.rebecca?.plan ?? "нет плана"}
+            </pre>
+          </div>
+        )}
+      </section>
+
+      <section style={{ marginTop: 24 }}>
+        <h3>Последние инициативы</h3>
+        <div style={{ display: "grid", gap: 12 }}>
+          {recent.map((it) => (
+            <div key={it.initiative_id} style={{ border: "1px solid #eee", padding: 12, borderRadius: 6 }}>
+              <div style={{ fontSize: 12, color: "#666" }}>
+                {new Date(it.created_at).toLocaleString()} · {it.initiative_id}
+              </div>
+              <div style={{ fontWeight: 600, marginTop: 6 }}>{it.goal}</div>
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                artifact_id: <code>{it.artifact_id ?? "—"}</code> · tokens: <code>{it.cost_tokens ?? "n/a"}</code>
+              </div>
+              {it.content_preview && (
+                <pre style={{ whiteSpace: "pre-wrap", background: "#fafafa", padding: 8, borderRadius: 6, marginTop: 6 }}>
+                  {it.content_preview}
+                </pre>
+              )}
+            </div>
+          ))}
         </div>
-      )}
-
-      {plan && (
-        <div style={{ marginTop: 20 }}>
-          <h3>План от Ребекки</h3>
-          <pre style={{ whiteSpace: "pre-wrap" }}>{plan}</pre>
-        </div>
-      )}
-    </div>
+      </section>
+    </main>
   );
 }

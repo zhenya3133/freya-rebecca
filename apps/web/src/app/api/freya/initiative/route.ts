@@ -1,6 +1,5 @@
 // apps/web/src/app/api/freya/initiative/route.ts
-// Мини-Фрея: принимает цель, создает инициативу, вызывает Ребекку и возвращает объединенный ответ.
-
+import { pool } from "@/lib/db";
 export const runtime = "nodejs";
 
 type KPI = { name: string; target: number; unit?: string };
@@ -10,55 +9,90 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => ({}));
     const goal = typeof body.goal === "string" ? body.goal.trim() : "";
     const kpi: KPI[] = Array.isArray(body.kpi) ? body.kpi : [];
-    const budget = body.budget ?? null; // { tokens?: number, usd?: number }
+    const budget = body.budget ?? null;
     const deadline = typeof body.deadline === "string" ? body.deadline : null;
 
     if (!goal) {
-      return new Response(JSON.stringify({ error: "Provide 'goal' as non-empty string" }), { status: 400 });
+      return new Response(JSON.stringify({ error: "Provide 'goal' as non-empty string" }), {
+        status: 400, headers: { "Content-Type": "application/json; charset=utf-8" }
+      });
+    }
+    if (!process.env.DATABASE_URL) {
+      return new Response(JSON.stringify({ error: "DATABASE_URL not set" }), {
+        status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+      });
     }
 
-    // Инициатива Фреи (без БД, пока в ответе)
-    const initiative = {
-      initiative_id: crypto.randomUUID(),
-      goal,
-      kpi,
-      budget,
-      deadline,
-      status: "created",
-      created_at: new Date().toISOString()
-    };
-
-    // Вычисляем базовый URL из запроса, чтобы обратиться к Ребекке на том же хосте
-    const base = new URL(req.url);
-    base.pathname = "/api/rebecca/execute";
-    base.search = "";
-
-    // Вызываем Ребекку
-    const rebeccaResp = await fetch(base.toString(), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ goal })
-    });
-
-    if (!rebeccaResp.ok) {
-      const errText = await rebeccaResp.text();
-      return new Response(
-        JSON.stringify({ error: "Rebecca failed", initiative, details: errText }),
-        { status: 502, headers: { "Content-Type": "application/json; charset=utf-8" } }
-      );
+    // 1) Сохраняем инициативу
+    let initiative: any;
+    try {
+      const insertSql = `
+        INSERT INTO initiatives (goal, kpi_json, budget_json, deadline, status)
+        VALUES ($1, $2, $3, $4::date, 'created')
+        RETURNING id, goal, kpi_json, budget_json, deadline, status, created_at
+      `;
+      const params = [goal, JSON.stringify(kpi), JSON.stringify(budget), deadline];
+      const { rows } = await pool.query(insertSql, params);
+      initiative = rows[0];
+    } catch (e: any) {
+      return new Response(JSON.stringify({ step: "insert_initiative", error: String(e?.message ?? e) }), {
+        status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+      });
     }
 
-    const rebeccaJson = await rebeccaResp.json().catch(() => ({}));
-    const plan = typeof rebeccaJson.plan === "string" ? rebeccaJson.plan : "Нет плана от Ребекки.";
+    // 2) Вызываем Ребекку
+    let rebeccaJson: any;
+    try {
+      const base = new URL(req.url);
+      base.pathname = "/api/rebecca/execute";
+      base.search = "";
+      const rebeccaResp = await fetch(base.toString(), {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ goal })
+      });
+      if (!rebeccaResp.ok) {
+        const errText = await rebeccaResp.text();
+        return new Response(JSON.stringify({ step: "call_rebecca", initiative, error: errText }), {
+          status: 502, headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
+      rebeccaJson = await rebeccaResp.json().catch(() => ({}));
+    } catch (e: any) {
+      return new Response(JSON.stringify({ step: "call_rebecca_throw", initiative, error: String(e?.message ?? e) }), {
+        status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+      });
+    }
 
-    // Объединенный ответ Фреи
-    const result = {
-      initiative,
-      rebecca: { plan }
-    };
+    // 3) Сохраняем артефакт (план)
+    try {
+      const plan   = typeof rebeccaJson.plan === "string" ? rebeccaJson.plan : "Нет плана от Ребекки.";
+      const model  = rebeccaJson.model ?? "gpt-4.1-mini";
+      const usage  = rebeccaJson.usage ?? null;
+      const tokens = (usage && (usage.total_tokens ?? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0))) || null;
 
-    return new Response(JSON.stringify(result), { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } });
+      const insertArtifact = `
+        INSERT INTO artifacts (initiative_id, type, title, content, summary, cost_tokens, cost_usd, meta_json)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, created_at
+      `;
+      const aParams = [initiative.id, "plan", `Plan for: ${goal}`, plan, null, tokens, null, JSON.stringify({ model, usage })];
+      const art = await pool.query(insertArtifact, aParams).then(r => r.rows[0]);
+
+      return new Response(JSON.stringify({
+        initiative,
+        rebecca: { model, tokens, artifact_id: art?.id ?? null, plan }
+      }), { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } });
+
+    } catch (e: any) {
+      return new Response(JSON.stringify({ step: "insert_artifact", initiative, error: String(e?.message ?? e) }), {
+        status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+      });
+    }
+
   } catch (e: any) {
-    return new Response(JSON.stringify({ error: String(e?.message ?? e) }), { status: 500 });
+    return new Response(JSON.stringify({ step: "outer_catch", error: String(e?.message ?? e) }), {
+      status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+    });
   }
 }
