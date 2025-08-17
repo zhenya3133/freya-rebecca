@@ -1,5 +1,5 @@
 // apps/web/src/app/api/freya/initiative/route.ts
-import { pool } from "@/lib/db";
+import { pool, withPgRetry } from "@/lib/db";
 export const runtime = "nodejs";
 
 type KPI = { name: string; target: number; unit?: string };
@@ -35,7 +35,8 @@ export async function POST(req: Request) {
         RETURNING id, goal, kpi_json, budget_json, deadline, status, created_at
       `;
       const params = [goal, JSON.stringify(kpi), JSON.stringify(budget), deadline];
-      const { rows } = await pool.query(insertSql, params);
+      const { rows } = await withPgRetry(() => pool.query(insertSql, params));
+initiative = rows[0];
       initiative = rows[0];
     } catch (e: unknown) {
       return new Response(JSON.stringify({ step: "insert_initiative", error: String((e as Error)?.message ?? e) }), {
