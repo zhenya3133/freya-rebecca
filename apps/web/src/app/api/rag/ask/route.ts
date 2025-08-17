@@ -5,52 +5,58 @@ import { getEmbedding, toVectorLiteral } from "@/lib/embeddings";
 
 export const runtime = "nodejs";
 
-type AskBody = {
-  query?: string;
-  topK?: number;
-};
+type AskBody = { query?: string; topK?: number };
 
 export async function POST(req: Request) {
   try {
-    if (!process.env.OPENAI_API_KEY) {
-      return jsonErr(500, "OPENAI_API_KEY is not set");
-    }
-    if (!process.env.DATABASE_URL) {
-      return jsonErr(500, "DATABASE_URL is not set");
-    }
+    if (!process.env.OPENAI_API_KEY) return jsonErr(500, "OPENAI_API_KEY is not set");
+    if (!process.env.DATABASE_URL)   return jsonErr(500, "DATABASE_URL is not set");
 
     const body = (await req.json().catch(() => ({}))) as AskBody;
     const query = (body.query ?? "").trim();
-    const topK = clampInt(body.topK ?? 4, 1, 8);
+    const topK  = clampInt(body.topK ?? 4, 1, 8);
+    if (!query) return jsonErr(400, "Provide 'query' in request body");
 
-    if (!query) {
-      return jsonErr(400, "Provide 'query' in request body");
-    }
-
-    // 1) эмбеддинг запроса
+    // 1) эмбеддинг вопроса
     const vec = await getEmbedding(query);
-    const vecLiteral = toVectorLiteral(vec); // строка вида "[0.1,0.2,...]"
+    const vecParam = toVectorLiteral(vec); // "[0.1,0.2,...]"
 
-    // 2) поиск в памяти
+    // 2) поиск ближайших фрагментов в памяти
+    // ВНИМАНИЕ: у нас индекс vector_l2_ops -> используем оператор L2 '<->'.
+    // Также упрощаем ORDER BY (без алиаса) — это надёжнее на некоторых версиях PG.
     const sql = `
-      SELECT id, kind, content, metadata, created_at,
-             (embedding <=> $1::vector) AS distance
+      SELECT
+        id,
+        kind,
+        content,
+        metadata,
+        created_at,
+        (embedding <-> $1::vector) AS distance
       FROM memories
-      ORDER BY distance ASC
+      ORDER BY embedding <-> $1::vector
       LIMIT $2
     `;
-    const { rows } = await pool.query(sql, [vecLiteral, topK]);
+
+    let rows: any[] = [];
+    try {
+      const res = await pool.query(sql, [vecParam, topK]);
+      rows = res.rows ?? [];
+    } catch (dbErr: any) {
+      // вернём аккуратную ошибку с подсказкой
+      return jsonErr(
+        500,
+        `DB query failed: ${dbErr?.message ?? dbErr}. ` +
+        `Check pgvector ops/operator match (we use L2 '<->') and that table 'memories' exists.`
+      );
+    }
 
     const context = rows
-      .map(
-        (r: any, i: number) =>
-          `[${i + 1} ${r.kind} • d=${Number(r.distance).toFixed(4)}]\n${r.content}`
-      )
+      .map((r, i) => `[${i + 1} ${r.kind} • d=${Number(r.distance).toFixed(4)}]\n${r.content}`)
       .join("\n\n");
 
-    // 3) ответ модели на основе контекста
+    // 3) вызываем модель с контекстом
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const model = process.env.RAG_MODEL || "gpt-4.1-mini";
+    const model  = process.env.RAG_MODEL || "gpt-4.1-mini";
 
     const completion = await client.chat.completions.create({
       model,
@@ -59,7 +65,8 @@ export async function POST(req: Request) {
         {
           role: "system",
           content:
-            "Ты ассистент. Отвечай по-русски. Используй исключительно данный контекст. Если данных не хватает — скажи, чего не хватает.",
+            "Ты ассистент. Отвечай по-русски. Используй исключительно данный контекст. " +
+            "Если данных не хватает — скажи, чего не хватает.",
         },
         {
           role: "user",
@@ -74,12 +81,12 @@ export async function POST(req: Request) {
       query,
       model,
       answer,
-      sources: rows.map((r: any) => ({
+      sources: rows.map((r) => ({
         id: r.id,
         kind: r.kind,
         distance: Number(r.distance),
         created_at: r.created_at,
-        preview: String(r.content).slice(0, 200),
+        preview: String(r.content ?? "").slice(0, 200),
       })),
     });
   } catch (e: any) {

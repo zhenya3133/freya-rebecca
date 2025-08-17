@@ -1,37 +1,44 @@
 // apps/web/src/app/api/memory/search/route.ts
 import { NextRequest } from "next/server";
 import { pool } from "@/lib/db";
-import { embedText, toVectorLiteral } from "@/lib/embeddings";
+import { getEmbedding } from "@/lib/embeddings";
 
 export const runtime = "nodejs";
 
-type Body = {
-  query: string;
-  limit?: number;
-  initiative_id?: string;
-};
-
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as Body;
-    if (!body?.query) {
-      return Response.json({ error: "query is required" }, { status: 400 });
+    const body = await req.json().catch(() => ({}));
+    const query = (body?.query ?? "").toString().trim();
+
+    const limitRaw = Number(body?.limit);
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(20, limitRaw) : 5;
+
+    if (!query) {
+      return Response.json({ error: "Provide 'query' as non-empty string" }, { status: 400 });
     }
 
-    const limit = Math.min(Math.max(body.limit ?? 5, 1), 20);
-    const vec = toVectorLiteral(await embedText(body.query));
+    // 1) эмбеддинг текста запроса
+    const vec = await getEmbedding(query);
 
+    // 2) ПАРАМЕТРИЗОВАННЫЙ запрос: $1::vector — никакого ручного кавычения
     const sql = `
-      SELECT id, initiative_id, kind, content, metadata, created_at,
-             embedding <=> $1::vector AS distance
+      SELECT
+        id,
+        kind,
+        created_at,
+        (embedding <-> $1::vector)::float AS distance
       FROM memories
-      WHERE ($2::uuid IS NULL OR initiative_id = $2::uuid)
-      ORDER BY distance ASC
-      LIMIT $3
+      ORDER BY embedding <-> $1::vector
+      LIMIT $2
     `;
-    const out = await pool.query(sql, [vec, body.initiative_id ?? null, limit]);
-    return Response.json({ ok: true, items: out.rows });
-  } catch (err: any) {
-    return Response.json({ error: String(err?.message ?? err) }, { status: 500 });
+
+    // Значение для $1 — строка в формате pgvector: [v1,v2,...] без кавычек
+    const vecParam = `[${vec.join(",")}]`;
+    const { rows } = await pool.query(sql, [vecParam, limit]);
+
+    return Response.json({ items: rows }, { status: 200 });
+  } catch (e: any) {
+    return Response.json({ error: String(e?.message ?? e) }, { status: 500 });
   }
 }

@@ -3,11 +3,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+/* =======================
+ * Типы данных
+ * ======================= */
+
+type KPI = { name: string; target: number; unit?: string };
+
 type RecentItem = {
   initiative_id: string;
   goal: string;
-  kpi_json: any;
-  budget_json: any;
+  kpi_json: unknown;
+  budget_json: unknown;
   deadline: string | null;
   status: string;
   created_at: string;
@@ -27,38 +33,79 @@ type MemoryHit = {
   content?: string;
 };
 
+type InitiativeRow = {
+  id: string;
+};
+
+type RebeccaResult = {
+  model?: string;
+  tokens?: number | null;
+  artifact_id?: string | null;
+  plan?: string;
+  // Если бэкенд вернёт использованный контекст — покажем.
+  context_used?: Array<{ id: string; distance: number }>;
+};
+
+type InitiativeResponse = {
+  initiative?: InitiativeRow;
+  rebecca?: RebeccaResult;
+};
+
+type MemorySearchResponse = {
+  items?: MemoryHit[];
+};
+
+type RagAskResponse = {
+  answer: string;
+  sources: MemoryHit[];
+};
+
+/* =======================
+ * Компонент
+ * ======================= */
+
 export default function Playground() {
-  // ------- Инициатива -------
+  /* ------- Инициатива ------- */
   const [goal, setGoal] = useState(
-    "Сделай план запуска ИИ-агентов для мастера маникюра в Минске"
+    "Сделай план запуска ИИ-агентов для мастера маникюра в Минске",
   );
   const [deadline, setDeadline] = useState("2025-09-15");
-  const [tokens, setTokens] = useState(500000);
+  const [tokens, setTokens] = useState(500_000);
   const [usd, setUsd] = useState(20);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<InitiativeResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // ------- Последние инициативы -------
+  /* ------- Последние инициативы ------- */
   const [recent, setRecent] = useState<RecentItem[]>([]);
 
-  // ------- Поиск по памяти -------
+  /* ------- Поиск по памяти ------- */
   const [q, setQ] = useState(
-    "пилоты, интеграции и маркетинг для салона красоты в Минске"
+    "пилоты, интеграции и маркетинг для салона красоты в Минске",
   );
   const [searching, setSearching] = useState(false);
   const [searchErr, setSearchErr] = useState<string | null>(null);
   const [hits, setHits] = useState<MemoryHit[]>([]);
 
+  /* ------- RAG: спросить у памяти ------- */
+  const [ragQuery, setRagQuery] = useState(
+    "Как запустить пилоты и интеграции для салона красоты?",
+  );
+  const [ragTopK, setRagTopK] = useState(4);
+  const [ragLoading, setRagLoading] = useState(false);
+  const [ragErr, setRagErr] = useState<string | null>(null);
+  const [ragAnswer, setRagAnswer] = useState("");
+  const [ragSources, setRagSources] = useState<MemoryHit[]>([]);
+
   const canSubmit = useMemo(
     () => goal.trim().length > 0 && !loading,
-    [goal, loading]
+    [goal, loading],
   );
 
   async function refreshRecent() {
     try {
       const r = await fetch("/api/initiatives/recent", { cache: "no-store" });
-      const j = await r.json();
+      const j: { items?: RecentItem[] } = await r.json();
       setRecent(j.items ?? []);
     } catch (e) {
       console.error(e);
@@ -76,7 +123,7 @@ export default function Playground() {
     try {
       const body = {
         goal,
-        kpi: [{ name: "Leads", target: 5, unit: "count" }],
+        kpi: [{ name: "Leads", target: 5, unit: "count" } satisfies KPI],
         budget: { tokens, usd },
         deadline,
       };
@@ -85,15 +132,16 @@ export default function Playground() {
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify(body),
       });
-      const j = await r.json();
+      const j: InitiativeResponse & { step?: string; error?: string } =
+        await r.json();
       if (!r.ok) {
         setErr(`Ошибка: ${j?.step ?? "unknown"} -> ${j?.error ?? "no message"}`);
       } else {
         setResult(j);
         refreshRecent();
       }
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
     } finally {
       setLoading(false);
     }
@@ -110,16 +158,41 @@ export default function Playground() {
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify(body),
       });
-      const j = await r.json();
+      const j: MemorySearchResponse & { error?: string } = await r.json();
       if (!r.ok) {
         setSearchErr(String(j?.error ?? "search failed"));
       } else {
         setHits(j.items ?? []);
       }
-    } catch (e: any) {
-      setSearchErr(String(e?.message ?? e));
+    } catch (e) {
+      setSearchErr(String((e as Error).message ?? e));
     } finally {
       setSearching(false);
+    }
+  }
+
+  async function askRag() {
+    setRagLoading(true);
+    setRagErr(null);
+    setRagAnswer("");
+    setRagSources([]);
+    try {
+      const r = await fetch("/api/rag/ask", {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ query: ragQuery, topK: ragTopK }),
+      });
+      const j: RagAskResponse & { error?: string } = await r.json();
+      if (!r.ok) {
+        setRagErr(typeof j?.error === "string" ? j.error : "RAG error");
+      } else {
+        setRagAnswer(j.answer ?? "");
+        setRagSources(j.sources ?? []);
+      }
+    } catch (e) {
+      setRagErr(String((e as Error).message ?? e));
+    } finally {
+      setRagLoading(false);
     }
   }
 
@@ -129,7 +202,12 @@ export default function Playground() {
 
       {/* ---------- Запуск инициативы ---------- */}
       <section
-        style={{ marginTop: 16, padding: 16, border: "1px solid #ddd", borderRadius: 8 }}
+        style={{
+          marginTop: 16,
+          padding: 16,
+          border: "1px solid #ddd",
+          borderRadius: 8,
+        }}
       >
         <h3>Запуск инициативы</h3>
         <label>
@@ -188,7 +266,8 @@ export default function Playground() {
               initiative_id: <code>{result.initiative?.id}</code>
             </div>
             <div>
-              artifact_id: <code>{result.rebecca?.artifact_id ?? "—"}</code>
+              artifact_id:{" "}
+              <code>{result.rebecca?.artifact_id ?? "—"}</code>
             </div>
             <div>
               model: <code>{result.rebecca?.model ?? "n/a"}</code>
@@ -209,26 +288,34 @@ export default function Playground() {
             </pre>
 
             {/* Если rebecca/execute возвращает context_used, покажем для дебага */}
-            {Array.isArray(result.rebecca?.context_used) && (
-              <>
-                <h5 style={{ marginTop: 12 }}>Контекст RAG (идентификаторы памяти):</h5>
-                <ul>
-                  {result.rebecca.context_used.map((c: any) => (
-                    <li key={c.id}>
-                      <code>{c.id}</code> · distance:{" "}
-                      <code>{Number(c.distance).toFixed(3)}</code>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
+            {Array.isArray(result.rebecca?.context_used) &&
+              result.rebecca!.context_used!.length > 0 && (
+                <>
+                  <h5 style={{ marginTop: 12 }}>
+                    Контекст RAG (идентификаторы памяти):
+                  </h5>
+                  <ul>
+                    {result.rebecca!.context_used!.map((c) => (
+                      <li key={c.id}>
+                        <code>{c.id}</code> · distance:{" "}
+                        <code>{Number(c.distance).toFixed(3)}</code>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
           </div>
         )}
       </section>
 
-      {/* ---------- Поиск по памяти ---------- */}
+      {/* ---------- Поиск по памяти (векторный) ---------- */}
       <section
-        style={{ marginTop: 24, padding: 16, border: "1px solid #ddd", borderRadius: 8 }}
+        style={{
+          marginTop: 24,
+          padding: 16,
+          border: "1px solid #ddd",
+          borderRadius: 8,
+        }}
       >
         <h3>Поиск по памяти</h3>
         <div style={{ display: "flex", gap: 8 }}>
@@ -263,8 +350,114 @@ export default function Playground() {
                   kind: <code>{h.kind}</code> · distance:{" "}
                   <code>{Number(h.distance).toFixed(3)}</code>
                 </div>
+                {h.content && (
+                  <pre
+                    style={{
+                      whiteSpace: "pre-wrap",
+                      background: "#fafafa",
+                      padding: 8,
+                      borderRadius: 6,
+                      marginTop: 6,
+                    }}
+                  >
+                    {h.content}
+                  </pre>
+                )}
               </div>
             ))}
+          </div>
+        )}
+      </section>
+
+      {/* ---------- RAG — Спросить у памяти ---------- */}
+      <section
+        style={{
+          marginTop: 24,
+          padding: 16,
+          border: "1px solid #ddd",
+          borderRadius: 8,
+        }}
+      >
+        <h3>RAG — Спросить у памяти</h3>
+
+        <label>
+          Вопрос:
+          <textarea
+            value={ragQuery}
+            onChange={(e) => setRagQuery(e.target.value)}
+            rows={3}
+            style={{ width: "100%", marginTop: 8 }}
+          />
+        </label>
+
+        <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+          <label style={{ width: 140 }}>
+            topK
+            <input
+              type="number"
+              value={ragTopK}
+              onChange={(e) => setRagTopK(Math.max(1, Number(e.target.value)))}
+              style={{ width: "100%" }}
+            />
+          </label>
+        </div>
+
+        <button onClick={askRag} disabled={ragLoading || !ragQuery.trim()} style={{ marginTop: 12 }}>
+          {ragLoading ? "Ищем и отвечаем..." : "Спросить у памяти"}
+        </button>
+
+        {ragErr && (
+          <div style={{ marginTop: 12, color: "#b00020" }}>
+            <b>{ragErr}</b>
+          </div>
+        )}
+
+        {ragAnswer && (
+          <div style={{ marginTop: 16 }}>
+            <h4>Ответ</h4>
+            <pre
+              style={{
+                whiteSpace: "pre-wrap",
+                background: "#f7f7f7",
+                padding: 12,
+                borderRadius: 6,
+              }}
+            >
+              {ragAnswer}
+            </pre>
+          </div>
+        )}
+
+        {ragSources.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <h4>Источники (по близости)</h4>
+            <div style={{ display: "grid", gap: 10 }}>
+              {ragSources.map((s) => (
+                <div
+                  key={s.id}
+                  style={{ border: "1px solid #eee", borderRadius: 6, padding: 10 }}
+                >
+                  <div style={{ fontSize: 12, color: "#666" }}>
+                    {new Date(s.created_at).toLocaleString()} · distance:{" "}
+                    <code>{(s.distance ?? 0).toFixed(3)}</code> · kind:{" "}
+                    <code>{s.kind ?? "?"}</code>
+                  </div>
+                  {s.content && (
+                    <pre
+                      style={{
+                        whiteSpace: "pre-wrap",
+                        background: "#fafafa",
+                        padding: 8,
+                        borderRadius: 6,
+                        marginTop: 6,
+                      }}
+                    >
+                      {s.content}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </section>
