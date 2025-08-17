@@ -1,20 +1,17 @@
 // apps/web/src/lib/embeddings.ts
 import OpenAI from "openai";
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-/** Получаем вектор эмбеддинга */
 export async function getEmbedding(text: string): Promise<number[]> {
-  const input = text.replace(/\s+/g, " ").trim();
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
   const res = await client.embeddings.create({
-    model: "text-embedding-3-small",
-    input,
+    model: process.env.EMBED_MODEL || "text-embedding-3-small",
+    input: text,
   });
-  // у OpenAI это number[] (длина ~1536)
-  return res.data[0].embedding as unknown as number[];
+  // у OpenAI именно поле data[0].embedding
+  return (res.data[0].embedding as unknown) as number[];
 }
 
-/** Превращаем массив чисел в литерал для Postgres vector: [0.1,0.2,...] */
 export function toVectorLiteral(vec: number[]): string {
+  // ВАЖНО: без кавычек вокруг массива
   return `[${vec.join(",")}]`;
 }

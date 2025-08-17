@@ -12,49 +12,38 @@ export async function POST(req: Request) {
     if (!process.env.OPENAI_API_KEY) return jsonErr(500, "OPENAI_API_KEY is not set");
     if (!process.env.DATABASE_URL)   return jsonErr(500, "DATABASE_URL is not set");
 
-    const body = (await req.json().catch(() => ({}))) as AskBody;
+    const body  = (await req.json().catch(() => ({}))) as AskBody;
     const query = (body.query ?? "").trim();
-    const topK  = clampInt(body.topK ?? 4, 1, 8);
+    const topK  = clampInt(body.topK ?? 4, 1, 12);
     if (!query) return jsonErr(400, "Provide 'query' in request body");
 
-    // 1) эмбеддинг вопроса
-    const vec = await getEmbedding(query);
-    const vecParam = toVectorLiteral(vec); // "[0.1,0.2,...]"
+    // 1) embedding
+    const vec      = await getEmbedding(query);
+    const vecParam = toVectorLiteral(vec); // [0.1,-0.2,...] без кавычек
 
-    // 2) поиск ближайших фрагментов в памяти
-    // ВНИМАНИЕ: у нас индекс vector_l2_ops -> используем оператор L2 '<->'.
-    // Также упрощаем ORDER BY (без алиаса) — это надёжнее на некоторых версиях PG.
+    // 2) поиск по памяти (L2, т.к. индекс ivfflat(... vector_l2_ops))
     const sql = `
-      SELECT
-        id,
-        kind,
-        content,
-        metadata,
-        created_at,
-        (embedding <-> $1::vector) AS distance
+      SELECT id, kind, content, created_at, (embedding <-> $1::vector) AS distance
       FROM memories
-      ORDER BY embedding <-> $1::vector
+      ORDER BY distance ASC
       LIMIT $2
     `;
-
     let rows: any[] = [];
     try {
-      const res = await pool.query(sql, [vecParam, topK]);
-      rows = res.rows ?? [];
+      const r = await pool.query(sql, [vecParam, topK]);
+      rows = r.rows ?? [];
     } catch (dbErr: any) {
-      // вернём аккуратную ошибку с подсказкой
       return jsonErr(
         500,
-        `DB query failed: ${dbErr?.message ?? dbErr}. ` +
-        `Check pgvector ops/operator match (we use L2 '<->') and that table 'memories' exists.`
+        `DB query failed: ${dbErr?.message ?? dbErr}. Check memories table and pgvector ops ('<->').`
       );
     }
 
     const context = rows
-      .map((r, i) => `[${i + 1} ${r.kind} • d=${Number(r.distance).toFixed(4)}]\n${r.content}`)
+      .map((r: any, i: number) => `[${i + 1} ${r.kind} • d=${Number(r.distance).toFixed(4)}]\n${r.content}`)
       .join("\n\n");
 
-    // 3) вызываем модель с контекстом
+    // 3) ответ модели
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const model  = process.env.RAG_MODEL || "gpt-4.1-mini";
 
@@ -62,26 +51,18 @@ export async function POST(req: Request) {
       model,
       temperature: 0.2,
       messages: [
-        {
-          role: "system",
-          content:
-            "Ты ассистент. Отвечай по-русски. Используй исключительно данный контекст. " +
-            "Если данных не хватает — скажи, чего не хватает.",
-        },
-        {
-          role: "user",
-          content: `Вопрос: ${query}\n\nКонтекст:\n${context || "(память пуста)"}\n\nДай краткий ответ и список шагов.`,
-        },
+        { role: "system",
+          content: "Ты ассистент. Отвечай по-русски. Используй только данный контекст. Если данных не хватает — скажи, чего не хватает." },
+        { role: "user",
+          content: `Вопрос: ${query}\n\nКонтекст:\n${context || "(память пуста)"}\n\nДай краткий ответ и список шагов.` }
       ],
     });
 
     const answer = completion.choices?.[0]?.message?.content?.trim() ?? "";
 
     return jsonOk({
-      query,
-      model,
-      answer,
-      sources: rows.map((r) => ({
+      query, model, answer,
+      sources: rows.map((r: any) => ({
         id: r.id,
         kind: r.kind,
         distance: Number(r.distance),
@@ -95,11 +76,10 @@ export async function POST(req: Request) {
   }
 }
 
-// helpers
+/* utils */
 function jsonOk(data: any, status = 200) {
   return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    status, headers: { "Content-Type": "application/json; charset=utf-8" },
   });
 }
 function jsonErr(status: number, message: string) {
