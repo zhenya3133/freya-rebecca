@@ -7,29 +7,29 @@ export const runtime = "nodejs";
 
 type Body = {
   goal?: string;
-  topK?: number;          // необязательный оверрайд количества документов из памяти
+  topK?: number;  // количество документов контекста
+  ns?: string;    // namespace памяти
 };
 
 export async function POST(req: Request) {
   try {
-    // --- валидация окружения ---
     if (!process.env.OPENAI_API_KEY) return jsonErr(500, "OPENAI_API_KEY is not set");
     if (!process.env.DATABASE_URL)   return jsonErr(500, "DATABASE_URL is not set");
 
-    // --- парсим вход ---
     const body = (await req.json().catch(() => ({}))) as Body;
     const goal = (body.goal ?? "").trim();
-    if (!goal) return jsonErr(400, "Provide 'goal' in request body");
-
-    // сколько брать контекста из памяти
+    const ns   = (body.ns ?? "rebecca").trim() || "rebecca";
     const topK = clampInt(body.topK ?? Number(process.env.RAG_TOPK ?? 4), 1, 12);
 
-    // --- 1) эмбеддинг цели ---
-    const vec      = await getEmbedding(goal);  // number[]
-    const vecParam = toVectorLiteral(vec);      // строка вида: [0.123,-0.045,...]
+    if (!goal) return jsonErr(400, "Provide 'goal' in request body");
 
-    // --- 2) поиск ближайшего контекста в memories ---
-    // Для индекса ivfflat(... vector_l2_ops) используем L2-оператор '<->'
+    // 1) эмбеддинг цели
+    const vec = await getEmbedding(goal);
+    const vecParam = toVectorLiteral(vec);
+
+    // 2) ближайший контекст из памяти с учётом ns
+    // порядок: $1 = vector, $2 = ns, $3 = topK
+    // оператор L2 '<->' под индекс vector_l2_ops
     const sql = `
       SELECT
         id,
@@ -38,23 +38,12 @@ export async function POST(req: Request) {
         created_at,
         (embedding <-> $1::vector) AS distance
       FROM memories
+      WHERE metadata->>'ns' = $2
       ORDER BY distance ASC
-      LIMIT $2
+      LIMIT $3::int
     `;
+    const { rows } = await pool.query(sql, [vecParam, ns, topK]);
 
-    let rows: any[] = [];
-    try {
-      const res = await pool.query(sql, [vecParam, topK]);
-      rows = res.rows ?? [];
-    } catch (dbErr: any) {
-      return jsonErr(
-        500,
-        `DB query failed: ${dbErr?.message ?? dbErr}. ` +
-        `Ensure table 'memories' exists and pgvector ops match ('<->' for vector_l2_ops).`
-      );
-    }
-
-    // компактный контекст (чтобы не раздувать промпт)
     const contextText = rows
       .map(
         (r: any, i: number) =>
@@ -63,7 +52,7 @@ export async function POST(req: Request) {
       )
       .join("\n\n");
 
-    // --- 3) генерация плана с учётом контекста ---
+    // 3) генерируем план
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const model  = process.env.REBECCA_MODEL || "gpt-4.1-mini";
 
@@ -74,27 +63,29 @@ export async function POST(req: Request) {
         {
           role: "system",
           content:
-            "Ты помощник-стратег. Отвечай по-русски. Используй ТОЛЬКО переданный контекст. " +
-            "Если данных не хватает — скажи, что нужно уточнить."
+            "Ты помощник-стратег. Отвечай по-русски. Используй ТОЛЬКО данный контекст (если релевантен). " +
+            "Если данных не хватает — честно скажи, что нужно уточнить."
         },
         {
           role: "user",
           content:
             `Цель: ${goal}\n\n` +
-            `Контекст (ближайшие по смыслу фрагменты памяти):\n` +
+            `Контекст (источники из памяти, ближайшие по смыслу, ns=${ns}):\n` +
             (contextText || "(память пуста)") +
-            `\n\nСформируй понятный план действий короткими буллетами и очень краткое резюме.`
+            `\n\nСформируй понятный план действий (короткие буллеты) и очень краткое резюме.`
         }
       ]
     });
 
-    const plan   = completion.choices?.[0]?.message?.content?.trim() ?? "";
+    const plan  = completion.choices?.[0]?.message?.content?.trim() ?? "";
     const usage: any = (completion as any).usage ?? null;
     const tokens =
-      usage?.total_tokens ?? ((usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0)) ?? null;
+      usage?.total_tokens ??
+      ((usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0)) ??
+      null;
 
-    // --- 4) возвращаем результат + что попало в контекст (для отладки/визуализации) ---
     return jsonOk({
+      ns,
       model,
       tokens,
       usage,
