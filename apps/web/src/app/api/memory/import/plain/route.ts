@@ -1,57 +1,79 @@
 // apps/web/src/app/api/memory/import/plain/route.ts
-import { NextRequest } from "next/server";
 import { pool } from "@/lib/db";
 import { getEmbedding, toVectorLiteral } from "@/lib/embeddings";
 import { splitIntoChunks } from "@/lib/chunk";
+import { suggestNamespace } from "@/lib/suggestNs";
 
 export const runtime = "nodejs";
 
 type Body = {
-  ns?: string;
-  kind?: string;
-  title?: string;
-  text?: string;                              // основное содержимое
-  metadata?: Record<string, unknown>;
+  ns?: string;             // можно не указывать — определим автоматически
+  kind?: string;           // "doc" | "plan" | ...
+  text?: string;           // исходный контент
   chunk?: { size?: number; overlap?: number };
+  metadata?: Record<string, any>;
+  autoConfirm?: boolean;   // если true — не спрашиваем, а кладём как решено
 };
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const body = (await req.json().catch(() => ({}))) as Body;
-    const ns = (body.ns ?? "rebecca").trim() || "rebecca";
-    const kind = (body.kind ?? "doc").trim() || "doc";
-    const title = (body.title ?? "").trim();
-    const text = String(body.text ?? "");
-    if (!text) return jsonErr(400, "Provide 'text'");
+    const rawText = String(body.text ?? "").trim();
+    if (!rawText) return jsonErr(400, "Provide 'text'");
 
-    const metaBase = { ...(body.metadata ?? {}), ns, title };
-    const chunks = splitIntoChunks(text, body.chunk ?? {});
-
-    const ids: string[] = [];
-    for (const part of chunks) {
-      const vec = await getEmbedding(part);
-      const { rows } = await pool.query(
-        `
-        INSERT INTO memories (initiative_id, kind, content, embedding, metadata)
-        VALUES (NULL, $1, $2, $3::vector, $4::jsonb)
-        RETURNING id
-        `,
-        [kind, part, toVectorLiteral(vec), JSON.stringify(metaBase)]
-      );
-      ids.push(rows[0].id);
+    // 1) выбираем ns: если не пришёл — классифицируем
+    let ns = (body.ns ?? "").trim();
+    let decided = true;
+    if (!ns) {
+      const s = await suggestNamespace({
+        title: body.kind ?? "doc",
+        description: rawText.slice(0, 2000),
+        mediaType: "text",
+        tags: ["import", "plain"],
+      });
+      ns = s.ns;
+      decided = s.decided;
+      if (!body.autoConfirm && !decided) {
+        // вернём предложение и не будем импортировать
+        return jsonOk({ suggested: s, notice: "Not imported. Provide ns or set autoConfirm=true." }, 202);
+      }
     }
 
-    return jsonOk({ ok: true, count: ids.length, ids });
+    const kind = (body.kind ?? "doc");
+    const meta = {
+      ...(body.metadata ?? {}),
+      ns,
+      source: (body.metadata?.source ?? "plain"),
+      lang: (body.metadata?.lang ?? detectLang(rawText)),
+    };
+
+    // 2) чанкование → эмбеддинги → вставка
+    const parts = splitIntoChunks(rawText, body.chunk ?? {});
+    let inserted = 0;
+    for (const p of parts) {
+      const emb = await getEmbedding(p);
+      const vec = toVectorLiteral(emb);
+      await pool.query(
+        `INSERT INTO memories (kind, content, embedding, metadata)
+         VALUES ($1, $2, $3::vector, $4::jsonb)`,
+        [kind, p, vec, JSON.stringify(meta)]
+      );
+      inserted++;
+    }
+
+    return jsonOk({ ns, kind, chunks: parts.length, inserted, decided });
   } catch (e: any) {
-    console.error("memory/import/plain error:", e);
     return jsonErr(500, String(e?.message ?? e));
   }
 }
 
-function jsonOk(data: unknown, status = 200) {
+function detectLang(t: string): string {
+  // очень грубо: кириллица -> ru, иначе en
+  return /[а-яА-ЯЁё]/.test(t) ? "ru" : "en";
+}
+function jsonOk(data: any, status = 200) {
   return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    status, headers: { "Content-Type": "application/json; charset=utf-8" },
   });
 }
 function jsonErr(status: number, message: string) {
