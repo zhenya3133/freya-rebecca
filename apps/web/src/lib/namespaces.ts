@@ -123,3 +123,14 @@ export function filterAllowed(keys: string[] | undefined, ns: NamespaceDef[]): N
   const set = new Set(keys.map(k => k.trim().toLowerCase()));
   return ns.filter(n => set.has(n.key));
 }
+// apps/web/src/lib/namespaces.ts (добавить в конец файла)
+import { Pool } from 'pg';
+
+// используем отдельный пул по DATABASE_URL (или подключись к твоему существующему db-пулу)
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+export async function listNamespaces(): Promise<string[]> {
+  // Если у тебя schema другая, поменяй таблицу/поле
+  const { rows } = await pool.query('SELECT DISTINCT namespace FROM chunks ORDER BY namespace;');
+  return rows.map(r => r.namespace as string);
+}

@@ -21,7 +21,7 @@ const DEFAULTS = {
 } as const;
 
 /**
- * Главная функция: разбивает произвольный текст на чанки.
+ * Главная функция разбиения текста на чанки.
  * Алгоритм:
  *  1) Нормализует переносы строк и пробелы.
  *  2) Выделяет Markdown-блоки кода ```…``` и оставшийся текст.
@@ -41,7 +41,7 @@ export function splitIntoChunks(raw: string, opts: ChunkOptions = {}): string[] 
   // 1) Размечаем блоки кода ```...``` как единицы, между ними — обычный текст.
   const units = splitByCodeFences(text);
 
-  // 2) Обычный текст дальше дробим по заголовкам/параграфам.
+  // 2) Обычный текст дробим по заголовкам/параграфам.
   const logicalPieces: string[] = [];
   for (const u of units) {
     if (u.kind === "code") {
@@ -49,7 +49,7 @@ export function splitIntoChunks(raw: string, opts: ChunkOptions = {}): string[] 
     } else {
       const sections = splitByHeadings(u.text)
         .flatMap(splitByParagraphs)
-        .map(s => s.trim())
+        .map((s) => s.trim())
         .filter(Boolean);
       logicalPieces.push(...sections);
     }
@@ -70,7 +70,7 @@ export function splitIntoChunks(raw: string, opts: ChunkOptions = {}): string[] 
 
     // Если «логический» кусок уже больше лимита — дорезаем посимвольно.
     if (p.length > size) {
-      // Сначала выгружаем буфер, чтобы не перемешивать.
+      // Сначала выталкиваем буфер, чтобы не перемешивать.
       flush();
       packed.push(...splitByChars(p, size, overlap));
       continue;
@@ -82,23 +82,20 @@ export function splitIntoChunks(raw: string, opts: ChunkOptions = {}): string[] 
       continue;
     }
 
-    // Иначе — буфер на выход, и начинаем новый.
-    // Но следим, чтобы тот не был слишком маленький (если есть куда добрать).
+    // Иначе — буфер на выход, начинаем новый.
+    // Стремимся не оставлять слишком маленькие чанки (если можно слить).
     if (buffer && buffer.length < minSize) {
-      // попробуем дорисовать: если p маленький — склеим всё равно
-      if ((buffer.length + 1 + p.length) <= size) {
+      if (buffer.length + 1 + p.length <= size) {
         buffer = buffer + "\n" + p;
         continue;
       }
     }
     flush();
-
-    // новый буфер — текущий кусок (он гарантированно <= size)
-    buffer = p;
+    buffer = p; // p гарантированно <= size
   }
   flush();
 
-  // 4) Добавим перекрытие между чанками (по хвосту).
+  // 4) Добавляем перекрытие между чанками (хвост предыдущего + текущий).
   if (overlap > 0 && packed.length > 1) {
     const withOverlap: string[] = [];
     for (let i = 0; i < packed.length; i++) {
@@ -107,7 +104,6 @@ export function splitIntoChunks(raw: string, opts: ChunkOptions = {}): string[] 
         withOverlap.push(current);
       } else {
         const prevTail = packed[i - 1].slice(-overlap);
-        // если объединение превысит лимит — подрежем текущий
         const candidate = (prevTail + "\n" + current).trim();
         if (candidate.length <= size) {
           withOverlap.push(candidate);
@@ -119,10 +115,18 @@ export function splitIntoChunks(raw: string, opts: ChunkOptions = {}): string[] 
         }
       }
     }
-    return withOverlap.map(s => s.trim()).filter(Boolean);
+    return withOverlap.map((s) => s.trim()).filter(Boolean);
   }
 
-  return packed.map(s => s.trim()).filter(Boolean);
+  return packed.map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Обёртка для совместимости с остальным кодом проекта.
+ * Используй `chunkText(raw, options)` — под капотом вызывает `splitIntoChunks`.
+ */
+export function chunkText(raw: string, opts?: ChunkOptions): string[] {
+  return splitIntoChunks(raw, opts);
 }
 
 /* ------------------------ Вспомогательные утилиты ------------------------ */
@@ -148,7 +152,9 @@ export function normalizeText(input: string): string {
 }
 
 /** Разбивает на последовательность { kind: "code" | "text", text }. */
-function splitByCodeFences(text: string): Array<{ kind: "code" | "text"; text: string }> {
+function splitByCodeFences(
+  text: string
+): Array<{ kind: "code" | "text"; text: string }> {
   const re = /```[\s\S]*?```/g;
   const result: Array<{ kind: "code" | "text"; text: string }> = [];
   let lastIndex = 0;
@@ -191,14 +197,14 @@ function splitByHeadings(text: string): string[] {
 function splitByParagraphs(text: string): string[] {
   return text
     .split(/\n{2,}/)
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 }
 
 /** Посимвольное резание с overlap (fallback для очень длинных кусков). */
 function splitByChars(text: string, size: number, overlap: number): string[] {
   const chunks: string[] = [];
-  const step = Math.max(1, size - Math.min(size - 1, overlap));
+  const step = Math.max(1, size - Math.min(size - 1, overlap)); // = size - overlap
   for (let i = 0; i < text.length; i += step) {
     const part = text.slice(i, i + size).trim();
     if (part) chunks.push(part);

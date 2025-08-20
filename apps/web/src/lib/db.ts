@@ -52,3 +52,18 @@ export async function withPgRetry<T>(
   }
   throw last;
 }
+/**
+ * Простой helper для SQL-запросов через pool + withPgRetry.
+ * Возвращает массив строк (rows).
+ */
+export async function q<T = any>(sql: string, params?: any[]): Promise<T[]> {
+  return withPgRetry(async () => {
+    const client = await pool.connect();
+    try {
+      const res = await client.query<T>(sql, params);
+      return res.rows;
+    } finally {
+      client.release();
+    }
+  });
+}
