@@ -6,10 +6,12 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "migrate:g0": "node ./scripts/migrate-g0.js"
   },
   "dependencies": {
     "cheerio": "^1.1.2",
+    "dotenv": "^17.2.1",
     "next": "15.4.6",
     "openai": "^5.13.1",
     "pg": "^8.16.3",

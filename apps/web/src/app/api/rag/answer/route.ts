@@ -1,246 +1,168 @@
-import { NextResponse } from "next/server";
+// apps/web/src/app/api/rag/answer/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
-import { pool, withPgRetry } from "../../../../lib/db";
-import { embedMany } from "../../../../lib/embeddings";
+import { retrieveV2 } from "@/lib/retriever_v2";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/** Разрешаем только GPT-5 семейство. */
-const ALLOWED = new Set(["gpt-5", "gpt-5-mini", "gpt-5-nano"]);
-const norm = (s?: string) => (s ?? "").trim();
+// ——— Модели: только 4o-линейка ———
+const PRIMARY = (process.env.RAG_MODEL || "gpt-4o-mini").trim();
+const FAMILY  = ["gpt-4o-mini", "gpt-4o"];
+const ALLOWED = new Set(FAMILY);
 
-function pickModel(override?: string) {
-  const b = norm(override);
-  if (b && !ALLOWED.has(b)) {
-    const list = Array.from(ALLOWED).join(", ");
-    throw new Error(`unsupported_model: "${b}". Allowed: ${list}`);
+const SYSTEM =
+  "Ты — Rebecca. Отвечай ТОЛЬКО по предоставленным источникам. " +
+  "Если данных не хватает — так и скажи. Кратко (5–7 строк). " +
+  "Помечай факты ссылками [#N] и в конце выведи 'Sources:'.";
+
+function clamp(s: string, n = 1200) { return s.length > n ? s.slice(0, n) : s; }
+function tokensKV(maxTokens: number) {
+  const n = Math.min(900, Number.isFinite(maxTokens) ? maxTokens : 700);
+  // Для 4o используем классический max_tokens
+  return { max_tokens: n } as any;
+}
+
+function ensureText(x: any): string {
+  if (!x) return "";
+  if (typeof x === "string") return x.trim();
+  if (Array.isArray(x)) {
+    return x.map(p => {
+      if (typeof p === "string") return p;
+      if (p && typeof p.text === "string") return p.text;
+      if (p && p.content) return ensureText(p.content);
+      return "";
+    }).filter(Boolean).join("\n").trim();
   }
-  const env = norm(process.env.RAG_MODEL);
-  if (b) return b;
-  if (env && ALLOWED.has(env)) return env;
-  return "gpt-5-mini";
+  if (x && typeof x === "object") {
+    if (typeof (x as any).text === "string") return (x as any).text.trim();
+    if ((x as any).content) return ensureText((x as any).content);
+    if ((x as any).message?.content) return ensureText((x as any).message.content);
+  }
+  return String(x ?? "").trim();
 }
 
-function clampSnippet(s: string, max = 1200) {
-  return s.length > max ? s.slice(0, max) : s;
-}
-
-const SYSTEM_BRIEF =
-  "You are a helpful assistant for RAG. Answer ONLY from the provided context. " +
-  "Be concise (max 5–7 lines). If the answer is not in the context, say you don't have enough info. " +
-  "Then output a bullet list 'Sources:' with [#N] and path/URL.";
-
-/** Правильный вызов Responses API + (опц.) prompt caching. */
-async function askResponses(
-  client: OpenAI,
-  model: string,
-  system: string,
-  user: string,
-  useCache: boolean,
-  maxTokens: number
-) {
-  // В Responses используем `instructions` для «system» и messages-формат для input.
-  const params: OpenAI.ResponsesAPI.CreateParams = {
-    model,
-    instructions: system,
-    max_output_tokens: maxTokens,
-    input: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: user,
-            ...(useCache ? { cache_control: { type: "ephemeral" } as any } : {}),
-          },
-        ],
-      },
-    ],
-  };
-
-  // ВАЖНО: заголовок для prompt caching — во втором аргументе, а не в теле.
-  const opts = useCache
-    ? { headers: { "OpenAI-Beta": "prompt-caching-2024-07-31" } }
-    : undefined;
-
-  // не задаём temperature — у некоторых моделей семейства 5 поддерживается только дефолт.
-  // @ts-ignore: тип опционального второго аргумента
-  return client.responses.create(params, opts);
-}
-
-/** Фолбэк — Chat Completions тем же ID модели. */
 async function askChat(
-  client: OpenAI,
-  model: string,
-  system: string,
-  user: string,
-  maxTokens: number
+  client: OpenAI, model: string, system: string, user: string, maxTokens: number, forceText = false
 ) {
-  const base: any = {
+  const params: any = {
     model,
     messages: [
       { role: "system", content: system },
-      { role: "user", content: user },
+      { role: "user",   content: user + (forceText
+          ? '\n\nЕсли информации в источниках недостаточно, верни строку: "Недостаточно данных по источникам." Обязательно верни хотя бы одну строку текста.'
+          : "")
+      }
     ],
+    // Температуру не задаём — дефолта достаточно и стабильнее
+    ...tokensKV(maxTokens),
   };
-  // Для GPT-5 нужно max_completion_tokens, для остальных — max_tokens.
-  if (/^gpt-5/.test(model)) base.max_completion_tokens = maxTokens;
-  else base.max_tokens = maxTokens;
-
-  // temperature опускаем (некоторые 5-е модели принимают только дефолт).
-  return client.chat.completions.create(base);
+  const r = await client.chat.completions.create(params);
+  const raw = r?.choices?.[0]?.message?.content ?? "";
+  return ensureText(raw);
 }
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body = await req.json().catch(() => ({} as any));
     const {
-      query,
-      ns = "rebecca",
-      topK = 6,
-      minScore = 0.12,
+      query, ns,
+      fetchK = 24, topK = 10, minScore = 0.18,
       maxTokens = 450,
-      model: modelOverride,
-    } = body as {
-      query?: string;
-      ns?: string;
-      topK?: number;
-      minScore?: number;
-      maxTokens?: number;
-      model?: string; // gpt-5 | gpt-5-mini | gpt-5-nano
-    };
+      model: override,
+      slot = "staging",
+      debug = false,
+    } = body || {};
 
-    if (!query) {
-      return NextResponse.json(
-        { ok: false, error: "query is required" },
-        { status: 400 }
-      );
+    if (!query || !ns) {
+      return NextResponse.json({ ok: false, error: "query and ns are required" }, { status: 400 });
     }
 
-    let chosen: string;
-    try {
-      chosen = pickModel(modelOverride);
-    } catch (e: any) {
-      return NextResponse.json({ ok: false, error: e.message }, { status: 400 });
-    }
-
-    // 1) Векторный поиск
-    const [vec] = await embedMany([query]);
-    const vecLit = `[${vec.join(",")}]`;
-
-    const { rows } = await withPgRetry(() =>
-      pool.query(
-        `SELECT id, content,
-                (metadata->>'path') AS path,
-                (metadata->>'url')  AS url,
-                (embedding <=> $1::vector) AS dist
-         FROM memories
-         WHERE kind = $2
-         ORDER BY embedding <=> $1::vector ASC
-         LIMIT $3`,
-        [vecLit, ns, Math.max(1, Math.min(20, topK))]
-      )
-    );
-
-    const docs = rows
-      .map((r) => {
-        const dist = Number(r.dist);
-        const score = 1 - Math.min(1, dist);
-        return { id: r.id, path: r.path, url: r.url, content: String(r.content), score };
-      })
-      .filter((d) => d.score >= minScore);
-
-    if (!docs.length) {
+    // 1) Ретрив
+    const chunks = await retrieveV2({ ns, query, fetchK, topK, minScore, slot });
+    if (!chunks.length) {
       return NextResponse.json({
-        ok: true,
-        model: chosen,
-        mode: "none",
-        answer: "Недостаточно близкого контекста для уверенного ответа.",
-        sources: [],
-        matches: [],
+        ok: true, model: override || PRIMARY, mode: "none",
+        answer: "Недостаточно близкого контекста.",
+        sources: [], matches: [],
       });
     }
 
-    // 2) Компоновка контекста
-    const context = docs
-      .map((d, i) => `[#${i + 1}] ${d.url || d.path || d.id}\n${clampSnippet(d.content)}`)
-      .join("\n\n------\n\n");
-    const user = `Question: ${query}\n\nContext:\n${context}`;
+    // 2) Контекст и источники
+    const numbered: string[] = [];
+    const sources = chunks.map((c, i) => {
+      const title = c.source?.title || c.source?.path || c.source?.url || c.id;
+      numbered.push(`[#${i + 1}] ${title}\n${clamp(c.content)}`);
+      return { n: i + 1, path: c.source?.path, url: c.source?.url, score: Number(c.final.toFixed(4)) };
+    });
+    const user = `Вопрос: ${query}\n\nИсточники:\n${numbered.join("\n\n------\n\n")}`;
 
-    const useCache = norm(process.env.PROMPT_CACHE) === "1";
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+    // 3) LLM: только Chat (4o-линейка)
+    const client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY!,
+      timeout: Number(process.env.OPENAI_TIMEOUT_MS) || 60000,
+      maxRetries: 0,
+    });
 
-    // 3) Пытаемся через Responses; при нефатальной ошибке — Chat тем же id модели
-    let mode: "responses" | "chat" = "responses";
-    let resp: any;
-    try {
-      resp = await askResponses(
-        client,
-        chosen,
-        SYSTEM_BRIEF,
-        user,
-        useCache,
-        Number.isFinite(maxTokens) ? maxTokens : 450
-      );
-    } catch (e: any) {
-      const msg = String(e?.message ?? e);
-      if (/(model.*not|unknown model|No such model|permission|access|not allowed|unsupported)/i.test(msg)) {
-        return NextResponse.json(
-          { ok: false, error: "model_unavailable", detail: msg, model: chosen },
-          { status: 424 }
-        );
-      }
-      mode = "chat";
+    const tryModels = [...new Set(
+      [override, PRIMARY, ...FAMILY].filter(Boolean)
+    )].filter(m => ALLOWED.has(m as string)) as string[];
+
+    let used = "", answer = "", lastErr = "";
+    const dbg: any[] = [];
+
+    async function tryAll(model: string) {
       try {
-        resp = await askChat(
-          client,
-          chosen,
-          SYSTEM_BRIEF,
-          user,
-          Number.isFinite(maxTokens) ? maxTokens : 450
-        );
-      } catch (e2: any) {
-        return NextResponse.json(
-          { ok: false, error: "llm_call_failed", detail: String(e2?.message ?? e2), model: chosen },
-          { status: 502 }
-        );
+        const a1 = await askChat(client, model, SYSTEM, user, maxTokens, false);
+        dbg.push({ model, mode: "chat1", len: a1?.length || 0 });
+        if (a1) return a1;
+      } catch (e: any) {
+        lastErr = `${e?.status ?? ""} ${e?.message ?? e}`;
+        dbg.push({ model, where: "chat1", err: lastErr });
       }
+
+      try {
+        const a2 = await askChat(client, model, SYSTEM, user, maxTokens, true);
+        dbg.push({ model, mode: "chat2", len: a2?.length || 0 });
+        if (a2) return a2;
+      } catch (e: any) {
+        lastErr = `${e?.status ?? ""} ${e?.message ?? e}`;
+        dbg.push({ model, where: "chat2", err: lastErr });
+      }
+
+      return "";
     }
 
-    // 4) Извлекаем текст
-    let answer: string | undefined;
-    if (mode === "responses") {
-      // у Responses SDK есть удобный геттер output_text
-      // @ts-ignore
-      answer =
-        (resp as any).output_text ||
-        (resp as any)?.content?.[0]?.text ||
-        (resp as any)?.choices?.[0]?.message?.content;
-    } else {
-      answer = resp?.choices?.[0]?.message?.content;
+    for (const m of tryModels) {
+      const a = await tryAll(m);
+      if (a) { used = m; answer = a; break; }
     }
-    if (!answer) answer = "(no answer)";
 
-    const sources = docs.map((d, i) => ({
-      n: i + 1,
-      path: d.path,
-      url: d.url,
-      score: d.score,
+    // 4) Мягкий фолбэк на пустой ответ
+    if (!answer) {
+      used = used || (override || PRIMARY);
+      const fallback =
+        "Недостаточно близкого контекста для уверенного ответа. " +
+        "См. источники ниже — проверь формулировку вопроса или дополни базу знаний.";
+      return NextResponse.json({
+        ok: true, model: used, mode: "fallback", answer: fallback, sources, matches: [],
+        ...(debug ? { debug: dbg } : {}),
+      });
+    }
+
+    const matches = chunks.slice(0, 3).map((c) => ({
+      id: c.id,
+      path: c.source?.path,
+      url: c.source?.url,
+      score: Number(c.final.toFixed(4)),
+      preview: clamp(c.content, 500),
     }));
 
     return NextResponse.json({
-      ok: true,
-      model: chosen,
-      mode,
-      answer,
-      sources,
-      matches: docs.slice(0, 3),
+      ok: true, model: used, mode: "ok", answer, sources, matches,
+      ...(debug ? { debug: dbg } : {}),
     });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: String(e?.message ?? e), stack: e?.stack },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: String(e?.message ?? e) }, { status: 500 });
   }
 }

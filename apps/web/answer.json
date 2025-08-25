@@ -1,0 +1,8 @@
+﻿{
+    "minScore":  0.2,
+    "topK":  8,
+    "model":  "gpt-5-mini",
+    "maxTokens":  350,
+    "ns":  "rebecca/core",
+    "query":  "Кто такая Rebecca и какие у нас гейты качества?"
+}

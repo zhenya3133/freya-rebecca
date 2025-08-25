@@ -1,0 +1,7 @@
+﻿{
+    "query":  "Кто такая Rebecca и какие у нас гейты качества?",
+    "ns":  "rebecca/core",
+    "minScore":  0.2,
+    "lambda":  0.7,
+    "topK":  8
+}
