@@ -1,0 +1,11 @@
+{
+  "ns": "rebecca/army",
+  "clearAll": true,
+  "docs": [
+    {
+      "title": "ArmyAgents.md",
+      "content": "# Специализации агентов (каркас)\n\n## Цель\nСформировать состав \"армии\" из узких специализаций агентов для задач R&D, анализа, продакшн-инженерии.\n\n## Общие требования\n- Каждый агент имеет чёткую зону ответственности.\n- Формат описания: `name`, `purpose`, `inputs[]`, `outputs[]`.\n- Минимум зависимостей между агентами; стандартизированные интерфейсы.\n- Допускается каскад: scout → analyst → synthesizer → reviewer → publisher.\n\n## Схема JSON-объекта\n```json\n{\n  \"name\": \"string\",\n  \"purpose\": \"string\",\n  \"inputs\": [\"string\", \"...\"],\n  \"outputs\": [\"string\", \"...\"]\n}\n```\n\n## Примеры (эталонные специализации)\n\n### IntelMapper\n- purpose: Быстрый сбор справок и ссылок по теме.\n- inputs: [\"topic\"]\n- outputs: [\"links[]\", \"notes[]\"]\n\n### ResearchScout\n- purpose: Поиск первоисточников (papers, RFC, оф. доки) и свежих материалов.\n- inputs: [\"topic\", \"constraints?\"]\n- outputs: [\"sources[]\", \"abstracts[]\"]\n\n### EvidenceWeaver\n- purpose: Выделение цитат/фактов из источников с привязкой к ссылкам.\n- inputs: [\"sources[]\"]\n- outputs: [\"facts[] {quote, sourceId}\"]\n\n### IdeaSynthesizer\n- purpose: Синтез краткого вывода на основе фактов; выявление пробелов.\n- inputs: [\"facts[]\"]\n- outputs: [\"summary\", \"gaps[]\"]\n\n### PlanSmith\n- purpose: Генерация пошагового плана работ (MVP → продакшн), оценка рисков.\n- inputs: [\"summary\", \"constraints?\"]\n- outputs: [\"plan.steps[]\", \"risks[]\", \"mitigations[]\"]\n\n### CodeCrafter\n- purpose: Черновой код (скелеты модулей, интерфейсы, заглушки) согласно плану.\n- inputs: [\"plan.steps[]\"]\n- outputs: [\"repo.diff\", \"stubs[]\"]\n\n### TestSentinel\n- purpose: Минимальные тесты и smoke-сценарии для скелета кода.\n- inputs: [\"repo.diff\", \"stubs[]\"]\n- outputs: [\"tests[]\", \"ci.suggestions\"]\n\n### ReviewGuardian\n- purpose: Лёгкий ревью, статическая проверка, список правок.\n- inputs: [\"repo.diff\", \"tests[]\"]\n- outputs: [\"review.notes[]\", \"fixes[]\"]\n\n## Гайд по выводу\n- Если запрошен JSON — верни только валидный массив объектов без текста.\n- Для Q&A — кратко опиши роли и добавь список названий.\n"
+    }
+  ]
+}
+

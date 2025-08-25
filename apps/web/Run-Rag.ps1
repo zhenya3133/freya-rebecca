@@ -22,11 +22,15 @@ param(
   [int]   $MaxTokens = 450,
   [string]$Model     = "gpt-4o-mini",
 
+  # профиль ответа (см. /api/rag/answer)
+  [string]$Profile   = "qa",           # qa | json | code | list | spec
+  [string]$CodeLang  = "typescript",   # для profile=code
+
   # диагностика
   [int]   $DiagLimit = 20
 )
 
-# --- консоль в UTF-8 (чтобы русская кириллица не билась) ---
+# --- консоль в UTF-8 (чтобы кириллица не билась) ---
 [Console]::InputEncoding  = [Text.Encoding]::UTF8
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $ProgressPreference = 'SilentlyContinue'
@@ -34,7 +38,7 @@ $ProgressPreference = 'SilentlyContinue'
 function Write-Head($t){ Write-Host "`n=== $t ===" -ForegroundColor Cyan }
 
 function Invoke-JsonPost($url, $obj){
-  $json = if ($obj -is [string]) { $obj } else { $obj | ConvertTo-Json -Depth 12 }
+  $json  = if ($obj -is [string]) { $obj } else { $obj | ConvertTo-Json -Depth 12 }
   $bytes = [Text.Encoding]::UTF8.GetBytes($json)
   try{
     return Invoke-RestMethod $url -Method POST -ContentType "application/json; charset=utf-8" -Body $bytes
@@ -120,14 +124,31 @@ $ansResp = Invoke-JsonPost "$BaseUrl/api/rag/answer" @{
   minScore  = $MinScore
   maxTokens = $MaxTokens
   model     = $Model
+  profile   = $Profile
+  codeLang  = $CodeLang
   debug     = $true
 }
 
 "model: $($ansResp.model)"
 "mode:  $($ansResp.mode)"
+"prof:  $($ansResp.profile)"
+
 "`n-- ANSWER --`n$($ansResp.answer)"
 "`n-- SOURCES --`n"
 $ansResp.sources | Format-Table n, score, path, url -Auto
+
+# Если profile=json — покажем распарсенный payload (если сервер его вернул)
+if ($ansResp.payload) {
+  Write-Host "`n-- PAYLOAD (parsed JSON) --" -ForegroundColor Green
+  if ($ansResp.payload -is [System.Array]) {
+    $ansResp.payload | Format-Table -Auto | Out-Host
+  } else {
+    $ansResp.payload | ConvertTo-Json -Depth 8 | Out-Host
+  }
+}
+if ($ansResp.payloadParseError) {
+  Write-Host "`n(payloadParseError): $($ansResp.payloadParseError)" -ForegroundColor Yellow
+}
 
 "`n-- DEBUG (модели/попытки) --`n"
 $ansResp.debug | Format-Table model, mode, len, where, err -Auto
