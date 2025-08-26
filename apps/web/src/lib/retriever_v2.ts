@@ -42,29 +42,51 @@ async function embedQuery(text: string): Promise<number[]> {
   return r.data[0].embedding as unknown as number[];
 }
 
-async function dbCandidates(ns: string, query: string, qVec: number[], slot: "staging" | "prod", fetchK: number): Promise<RetrievedChunk[]> {
+/**
+ * Кандидаты из БД с учётом pubdate и TTL.
+ * age_days считается от:
+ *   source.metadata.published_at -> source.published_at -> created_at
+ * Документы старше ttlDays (если задан) отфильтровываются.
+ */
+async function dbCandidates(
+  ns: string,
+  query: string,
+  qVec: number[],
+  slot: "staging" | "prod",
+  fetchK: number,
+  ttlDays?: number
+): Promise<RetrievedChunk[]> {
   const qvecText = "[" + qVec.map(x => Number(x).toFixed(6)).join(",") + "]";
-const rows = await q<any>(`
-  with base as (
+
+  const rows = await q<any>(`
+    with base as (
+      select
+        id,
+        content,
+        source,
+        created_at,
+        coalesce(
+          nullif((source->'metadata'->>'published_at'), '')::timestamptz,
+          nullif((source->>'published_at'), '')::timestamptz,
+          created_at
+        ) as pub_ts,
+        (1 - (embedding <=> $2::vector)) as dense,
+        ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $1)) as bm25,
+        (embedding::text) as emb_text
+      from chunks
+      where ns = $3 and slot = $4
+    )
     select
-      id,
-      content,
-      source,
-      created_at,
-      (1 - (embedding <=> $2::vector)) as dense,
-      ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $1)) as bm25,
-      extract(epoch from (now() - created_at))/86400.0 as age_days,
-      (embedding::text) as emb_text
-    from chunks
-    where ns = $3 and slot = $4
-  )
-  select * from base
-  order by (dense + bm25) desc
-  limit $5;
-`, [query, qvecText, ns, slot, fetchK]);
+      id, content, source, created_at, dense, bm25,
+      extract(epoch from (now() - pub_ts))/86400.0 as age_days,
+      emb_text
+    from base
+    where ($6::int is null) or (now() - pub_ts <= make_interval(days => $6::int))
+    order by (dense + bm25) desc
+    limit $5;
+  `, [query, qvecText, ns, slot, fetchK, (ttlDays ?? null)]);
 
-
-  return rows.map(r => ({
+  return rows.map((r: any) => ({
     id: r.id,
     content: r.content,
     source: r.source || null,
@@ -110,17 +132,22 @@ export async function retrieveV2(opts: RetrieveOpts): Promise<RetrievedChunk[]> 
 
   const qVec = await embedQuery(query);
   const rc = nsRecency(ns);
-  let cand = await dbCandidates(ns, query, qVec, slot, fetchK);
 
+  // Вытаскиваем кандидатов с учетом TTL
+  let cand = await dbCandidates(ns, query, qVec, slot, fetchK, rc.ttlDays);
+
+  // Финальный скоринг: dense + bm25 + recency(timeDecay)
   cand = cand.map(c => {
     const t = timeDecay(c.age_days, rc.halfLifeDays);
     const final = rc.alpha * c.dense + rc.gamma * c.bm25 + rc.beta * t;
     return { ...c, final };
   });
 
-  cand = cand.filter(c => c.final >= minScore).sort((a,b) => b.final - a.final);
+  // Отсечка по порогу и сортировка
+  cand = cand.filter(c => c.final >= minScore).sort((a, b) => b.final - a.final);
 
+  // MMR-диверсификация
   const picked = mmrSelect(qVec, cand, Math.min(topK, cand.length), lambda);
-  picked.sort((a,b) => b.final - a.final);
+  picked.sort((a, b) => b.final - a.final);
   return picked;
 }
