@@ -1,6 +1,6 @@
 <# ======================================================================
  Run-Rag.ps1
- one-shot: seed(clearAll) → diag → ask → answer
+ one-shot: seed(clearAll) → diag → ask → answer → (опц.) save agents
  PowerShell 7.x, UTF-8. Запускай из папки apps/web.
 ====================================================================== #>
 
@@ -23,11 +23,16 @@ param(
   [string]$Model     = "gpt-4o-mini",
 
   # профиль ответа (см. /api/rag/answer)
-  [string]$Profile   = "qa",           # qa | json | code | list | spec
+  [ValidateSet('qa','json','code','list','spec')]
+  [string]$Profile   = "qa",
   [string]$CodeLang  = "typescript",   # для profile=code
 
   # диагностика
-  [int]   $DiagLimit = 20
+  [int]   $DiagLimit = 20,
+
+  # --- Новое: сохранение массива агентов в БД через /api/agents/save ---
+  [switch]$SaveAgents,                        # включает сохранение
+  [string]$AgentsJsonPath = ".\answer.json"   # путь куда сохранить payload перед отправкой
 )
 
 # --- консоль в UTF-8 (чтобы кириллица не билась) ---
@@ -37,19 +42,53 @@ $ProgressPreference = 'SilentlyContinue'
 
 function Write-Head($t){ Write-Host "`n=== $t ===" -ForegroundColor Cyan }
 
-function Invoke-JsonPost($url, $obj){
-  $json  = if ($obj -is [string]) { $obj } else { $obj | ConvertTo-Json -Depth 12 }
-  $bytes = [Text.Encoding]::UTF8.GetBytes($json)
-  try{
-    return Invoke-RestMethod $url -Method POST -ContentType "application/json; charset=utf-8" -Body $bytes
-  } catch {
-    if ($_.Exception.Response) {
-      $reader = New-Object IO.StreamReader ($_.Exception.Response.GetResponseStream())
-      $body   = $reader.ReadToEnd()
-      Write-Host ("HTTP error from `n  {0}`n{1}" -f $url,$body) -ForegroundColor Red
-    } else {
-      Write-Host $_ -ForegroundColor Red
+# Универсальный вывод HTTP-ошибки (работает в PS7)
+function Show-HttpError {
+  param(
+    [string]$Where,
+    $Ex,
+    [string]$Url
+  )
+  $resp = $Ex.Exception.Response
+  $code = $null
+  $body = $null
+
+  if ($null -ne $resp) {
+    if ($resp -is [System.Net.Http.HttpResponseMessage]) {
+      $code = [int]$resp.StatusCode
+      try { $body = $resp.Content.ReadAsStringAsync().Result } catch {}
+    } elseif ($resp -is [System.Net.WebResponse]) {
+      try { $code = [int]$resp.StatusCode } catch {}
+      try {
+        $stream = $resp.GetResponseStream()
+        if ($stream) {
+          $reader = New-Object IO.StreamReader($stream)
+          $body   = $reader.ReadToEnd()
+        }
+      } catch {}
     }
+  }
+  if (-not $body) {
+    if ($Ex.ErrorDetails -and $Ex.ErrorDetails.Message) { $body = $Ex.ErrorDetails.Message }
+    else { $body = $Ex | Out-String }
+  }
+
+  Write-Host ("HTTP error from`n  {0}`nStatus: {1}`n{2}" -f $Url, $code, $body) -ForegroundColor Red
+}
+
+# Преобразование объекта в компактную JSON-строку
+function To-JsonString($obj){
+  if ($obj -is [string]) { return $obj }
+  return ($obj | ConvertTo-Json -Depth 12 -Compress)
+}
+
+# POST JSON (строкой, без charset/байтов)
+function Invoke-JsonPost($url, $obj){
+  $json = To-JsonString $obj
+  try{
+    return Invoke-RestMethod -Uri $url -Method POST -ContentType "application/json" -Body $json
+  } catch {
+    Show-HttpError -Where "Invoke-JsonPost" -Ex $_ -Url $url
     throw
   }
 }
@@ -59,10 +98,39 @@ function Get-Diag($base,$ns,$slot,$limit){
   Invoke-RestMethod "$base/api/diag/chunks?ns=$nsEnc&slot=$slot&limit=$limit"
 }
 
+# --- Новое: POST /api/agents/save ---
+function Invoke-AgentsSave {
+  param([string]$JsonPath)
+
+  if (-not (Test-Path $JsonPath)) {
+    Write-Host "Agents JSON not found: $JsonPath" -ForegroundColor Red
+    return
+  }
+  $json = Get-Content -Raw -Encoding UTF8 $JsonPath
+
+  # простая проверка что это массив JSON
+  if ($json.Trim().Substring(0,1) -ne "[") {
+    Write-Host "Ожидался JSON-массив AgentSpec[], получили не-массив. Проверь профиль и payload." -ForegroundColor Yellow
+  }
+
+  $url = "$BaseUrl/api/agents/save"
+  try {
+    $resp = Invoke-RestMethod -Method Post -Uri $url -Body $json -ContentType "application/json"
+    if ($resp.ok) {
+      Write-Host ("Saved agents: {0}" -f ($resp.saved)) -ForegroundColor Green
+    } else {
+      Write-Host ("Save failed: {0}" -f ($resp.error)) -ForegroundColor Red
+    }
+  } catch {
+    Show-HttpError -Where "Invoke-AgentsSave" -Ex $_ -Url $url
+    throw
+  }
+}
+
 # --- быстрый чек, что dev-сервер слушает 3000 ---
 Write-Head "Проверка dev-сервера"
 $ok = (Test-NetConnection localhost -Port 3000).TcpTestSucceeded
-if(-not $ok){
+if(-not $ok -and $BaseUrl -like "http://localhost*"){
   Write-Host "Порт 3000 не слушается. Запусти:  npm run dev" -ForegroundColor Yellow
   return
 }
@@ -148,6 +216,35 @@ if ($ansResp.payload) {
 }
 if ($ansResp.payloadParseError) {
   Write-Host "`n(payloadParseError): $($ansResp.payloadParseError)" -ForegroundColor Yellow
+}
+
+# --- Новое: сохранение агентов ---
+if ($SaveAgents) {
+  Write-Head "Сохранение агентных спецификаций"
+  if ($Profile -ne 'json') {
+    Write-Host "Для SaveAgents профиль должен быть 'json' (получаем AgentSpec[])." -ForegroundColor Yellow
+  } elseif (-not $ansResp.payload) {
+    Write-Host "payload отсутствует в ответе сервера (нет, пустой или ошибка парсинга)." -ForegroundColor Red
+  } else {
+    # Получаем JSON-текст
+    $jsonOut = if ($ansResp.payload -is [string]) {
+      $ansResp.payload
+    } else {
+      $ansResp.payload | ConvertTo-Json -Depth 12 -Compress
+    }
+
+    # Сохраняем в файл
+    try {
+      Set-Content -Path $AgentsJsonPath -Value $jsonOut -Encoding UTF8
+      Write-Host ("Payload сохранён: {0}" -f (Resolve-Path $AgentsJsonPath)) -ForegroundColor Green
+    } catch {
+      Write-Host "Не удалось сохранить payload в файл: $AgentsJsonPath" -ForegroundColor Red
+      throw
+    }
+
+    # Отправляем на /api/agents/save
+    Invoke-AgentsSave -JsonPath $AgentsJsonPath
+  }
 }
 
 "`n-- DEBUG (модели/попытки) --`n"
