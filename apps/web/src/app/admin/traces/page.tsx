@@ -1,8 +1,8 @@
-'use client';
+"use client";
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from "react";
 
-type Row = {
+type TraceLite = {
   id: string;
   ns: string;
   query: string;
@@ -15,15 +15,14 @@ type Row = {
   answer_preview?: string | null;
 };
 
-type ListResp = {
+type TraceList = {
   ok: boolean;
-  ns?: string;
+  ns: string;
   total: number;
   limit: number;
   offset: number;
   nextOffset: number | null;
-  items: Row[];
-  error?: string;
+  items: TraceLite[];
 };
 
 type TraceFull = {
@@ -32,151 +31,178 @@ type TraceFull = {
   query: string;
   profile?: string | null;
   model?: string | null;
-  answer?: string | null;
-  matches?: any;
-  sources?: any;
   ok: boolean;
   error?: string | null;
   latency_ms?: number | null;
-  meta?: any;
   created_at: string;
+  answer?: string | null;
+  matches?: any;
+  sources?: any;
+  meta?: any;
 };
 
 export default function Page() {
-  const [baseUrl] = useState(''); // относительные вызовы
-  const [ns, setNs] = useState('rebecca/army/agents');
+  // ---- controls ----
+  const [adminKey, setAdminKey] = useState("");
+  const [ns, setNs] = useState("rebecca/army/agents");
+  const [profile, setProfile] = useState("");
+  const [model, setModel] = useState("");
+  const [okFilter, setOkFilter] = useState<"all"|"ok"|"fail">("all");
   const [limit, setLimit] = useState(20);
-  const [offset, setOffset] = useState(0);
-  const [onlyErrors, setOnlyErrors] = useState(false);
-  const [q, setQ] = useState('');
-  const [adminKey, setAdminKey] = useState('');
+
+  // ---- data ----
   const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<ListResp | null>(null);
+  const [list, setList] = useState<TraceList | null>(null);
+  const [detail, setDetail] = useState<TraceFull | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [opened, setOpened] = useState<TraceFull | null>(null);
-  const headers = useMemo(() => adminKey ? { 'X-Admin-Key': adminKey } : undefined, [adminKey]);
+  // persist AdminKey & ns в localStorage
+  useEffect(() => {
+    const ak = localStorage.getItem("adminKey") || "";
+    const savedNs = localStorage.getItem("traces.ns") || "";
+    const savedProfile = localStorage.getItem("traces.profile") || "";
+    const savedModel = localStorage.getItem("traces.model") || "";
+    const savedOk = (localStorage.getItem("traces.ok") as any) || "all";
+    if (ak) setAdminKey(ak);
+    if (savedNs) setNs(savedNs);
+    if (savedProfile) setProfile(savedProfile);
+    if (savedModel) setModel(savedModel);
+    if (savedOk === "ok" || savedOk === "fail" || savedOk === "all") setOkFilter(savedOk);
+  }, []);
+  useEffect(() => { localStorage.setItem("adminKey", adminKey); }, [adminKey]);
+  useEffect(() => { localStorage.setItem("traces.ns", ns); }, [ns]);
+  useEffect(() => { localStorage.setItem("traces.profile", profile); }, [profile]);
+  useEffect(() => { localStorage.setItem("traces.model", model); }, [model]);
+  useEffect(() => { localStorage.setItem("traces.ok", okFilter); }, [okFilter]);
 
-  async function load(nextOffset = 0) {
-    if (!adminKey) { setError('Введите Admin Key (локально: dev-12345)'); return; }
-    setLoading(true);
-    setError(null);
+  async function load(offset = 0) {
+    setLoading(true); setError(null);
     try {
-      const params = new URLSearchParams({ ns, limit: String(limit), offset: String(nextOffset) });
-      if (onlyErrors) params.set('onlyErrors','1');
-      if (q.trim()) params.set('q', q.trim());
-      const res = await fetch(`${baseUrl}/api/evals/traces?${params.toString()}`, { headers });
+      const p = new URLSearchParams({ ns, limit: String(limit), offset: String(offset) });
+      // Если бэкенд поддерживает серверные фильтры — передадим.
+      if (profile.trim()) p.set("profile", profile.trim());
+      if (model.trim())   p.set("model", model.trim());
+      if (okFilter !== "all") p.set("ok", okFilter === "ok" ? "1" : "0");
+
+      const res = await fetch(`/api/evals/traces?${p.toString()}`, {
+        headers: { "X-Admin-Key": adminKey || "" },
+      });
       const json = await res.json();
-      if (!json.ok) throw new Error(json.error || 'List failed');
-      setData(json);
-      setOffset(nextOffset);
-    } catch (e:any) {
-      setError(e?.message ?? 'List failed');
+      if (!res.ok || json.ok === false) throw new Error(json.error || `HTTP ${res.status}`);
+      setList(json);
+    } catch (e: any) {
+      setError(e.message || String(e));
     } finally {
       setLoading(false);
     }
   }
 
   async function openTrace(id: string) {
-    if (!adminKey) { alert('Введите Admin Key'); return; }
-    const res = await fetch(`/api/evals/trace?id=${encodeURIComponent(id)}`, { headers });
-    const json = await res.json();
-    if (!json.ok) { alert(json.error || 'Load failed'); return; }
-    setOpened(json.item as TraceFull);
+    setError(null);
+    try {
+      const res = await fetch(`/api/evals/trace?id=${encodeURIComponent(id)}`, {
+        headers: { "X-Admin-Key": adminKey || "" },
+      });
+      const json = await res.json();
+      if (!res.ok || json.ok === false) throw new Error(json.error || `HTTP ${res.status}`);
+      setDetail(json.item as TraceFull);
+    } catch (e: any) {
+      setError(e.message || String(e));
+    }
   }
 
-  useEffect(() => { /* авто-старт не делаем без ключа */ }, []);
+  // доп. клиентская фильтрация, если сервер не умеет
+  const filtered = useMemo(() => {
+    let items = list?.items ?? [];
+    if (okFilter !== "all") items = items.filter(i => i.ok === (okFilter === "ok"));
+    if (profile.trim()) items = items.filter(i => (i.profile || "").toLowerCase().includes(profile.toLowerCase()));
+    if (model.trim())   items = items.filter(i => (i.model || "").toLowerCase().includes(model.toLowerCase()));
+    return items;
+  }, [list, okFilter, profile, model]);
+
+  useEffect(() => { load(0); }, []); // on mount
 
   return (
     <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-semibold">Traces</h1>
+      <h1 className="text-2xl font-semibold">Eval Traces</h1>
 
-      <div className="grid md:grid-cols-2 gap-3">
+      <div className="grid md:grid-cols-3 gap-3">
         <L label="Namespace (ns)">
           <input className="w-full border rounded p-2" value={ns} onChange={e=>setNs(e.target.value)} />
         </L>
-        <L label="Admin Key">
-          <input className="w-full border rounded p-2" placeholder="dev-12345" value={adminKey} onChange={e=>setAdminKey(e.target.value)} />
-        </L>
-        <L label="Search in query">
-          <input className="w-full border rounded p-2" value={q} onChange={e=>setQ(e.target.value)} />
+        <L label="OK filter">
+          <select className="w-full border rounded p-2" value={okFilter} onChange={e=>setOkFilter(e.target.value as any)}>
+            <option value="all">all</option>
+            <option value="ok">only OK</option>
+            <option value="fail">only FAIL</option>
+          </select>
         </L>
         <L label="Limit">
           <input type="number" className="w-full border rounded p-2" value={limit} onChange={e=>setLimit(Number(e.target.value||20))} />
         </L>
-        <L label="Filters" full>
-          <label className="inline-flex items-center gap-2">
-            <input type="checkbox" checked={onlyErrors} onChange={e=>setOnlyErrors(e.target.checked)} />
-            <span>Only errors</span>
-          </label>
+        <L label="Profile (contains)">
+          <input className="w-full border rounded p-2" value={profile} onChange={e=>setProfile(e.target.value)} />
+        </L>
+        <L label="Model (contains)">
+          <input className="w-full border rounded p-2" value={model} onChange={e=>setModel(e.target.value)} />
+        </L>
+        <L label="Admin Key" full>
+          <input className="w-full border rounded p-2" placeholder="dev-12345" value={adminKey} onChange={e=>setAdminKey(e.target.value)} />
         </L>
       </div>
 
       <div className="flex gap-2">
-        <Btn onClick={()=>load(0)} disabled={loading}>{loading ? 'Loading…' : 'Load'}</Btn>
-        <Btn outlined onClick={()=>{ if (data?.nextOffset!=null) load(data.nextOffset); }}>Next →</Btn>
-        <Btn outlined onClick={()=>{ const prev = Math.max(0, offset - (data?.limit ?? limit)); load(prev); }}>← Prev</Btn>
+        <Btn onClick={()=>load(0)} disabled={loading}>{loading ? "Loading…" : "Load"}</Btn>
+        <Btn outlined disabled={!list || list.offset===0} onClick={()=>load(Math.max(0,(list?.offset??0)-(list?.limit??20)))}>← Prev</Btn>
+        <Btn outlined disabled={!list || list.nextOffset===null} onClick={()=>load(list!.nextOffset!)}>Next →</Btn>
       </div>
 
-      {error && <div className="text-red-600 text-sm">{error}</div>}
+      {error && <div className="text-red-600 text-sm">Error: {error}</div>}
 
       <div className="overflow-x-auto border rounded">
         <table className="w-full text-sm">
           <thead className="bg-gray-50">
             <tr>
-              <Th>Time</Th>
-              <Th>OK</Th>
-              <Th>Latency</Th>
-              <Th>Model</Th>
-              <Th>Query</Th>
-              <Th>Answer (preview)</Th>
-              <Th>ID</Th>
-              <Th></Th>
+              <Th>Time</Th><Th>OK</Th><Th>Latency</Th><Th>Profile</Th><Th>Model</Th><Th>Query</Th>
             </tr>
           </thead>
           <tbody>
-            {(data?.items ?? []).map(it => (
-              <tr key={it.id} className="border-t">
+            {filtered.map(it => (
+              <tr key={it.id} className="border-t hover:bg-gray-50 cursor-pointer" onClick={()=>openTrace(it.id)}>
                 <Td className="whitespace-nowrap">{it.created_at}</Td>
-                <Td>{it.ok ? <span className="text-green-600">OK</span> : <span className="text-red-600">FAIL</span>}</Td>
-                <Td className="text-right">{it.latency_ms ?? '—'} ms</Td>
-                <Td>{it.model ?? '—'}</Td>
-                <Td className="max-w-[24rem] truncate" title={it.query}>{it.query}</Td>
-                <Td className="max-w-[24rem] truncate" title={it.answer_preview ?? ''}>{it.answer_preview ?? '—'}</Td>
-                <Td className="font-mono text-xs">{it.id}</Td>
-                <Td><a className="text-blue-600 cursor-pointer" onClick={()=>openTrace(it.id)}>view</a></Td>
+                <Td>{it.ok ? <span className="text-green-700">OK</span> : <span className="text-red-700">FAIL</span>}</Td>
+                <Td className="text-right">{it.latency_ms ?? "—"} ms</Td>
+                <Td>{it.profile ?? "—"}</Td>
+                <Td>{it.model ?? "—"}</Td>
+                <Td title={it.query}>{(it.answer_preview || it.query || "—").slice(0,120)}</Td>
               </tr>
             ))}
-            {(data?.items?.length ?? 0) === 0 && (
-              <tr><td className="p-4 text-center text-gray-500" colSpan={8}>нет данных</td></tr>
+            {filtered.length === 0 && (
+              <tr><td colSpan={6} className="p-6 text-center text-gray-500">нет записей</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
-      {/* Modal */}
-      {opened && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4" onClick={()=>setOpened(null)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-5xl w-full max-h-[90vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
-            <div className="p-4 border-b flex items-center justify-between">
-              <div className="font-semibold">Trace {opened.id}</div>
-              <button className="px-3 py-1 border rounded" onClick={()=>setOpened(null)}>Close</button>
-            </div>
-            <div className="p-4 space-y-4 text-sm">
-              <KV k="ns" v={opened.ns} />
-              <KV k="time" v={opened.created_at} />
-              <KV k="ok" v={String(opened.ok)} />
-              <KV k="latency_ms" v={String(opened.latency_ms ?? '')} />
-              <KV k="model" v={opened.model ?? '—'} />
-              <KV k="profile" v={opened.profile ?? '—'} />
-              <Block label="query" text={opened.query} />
-              <Block label="answer" text={opened.answer ?? ''} />
-              <JsonBlock label="matches" obj={opened.matches} />
-              <JsonBlock label="sources" obj={opened.sources} />
-              <KV k="error" v={opened.error ?? ''} />
-              <JsonBlock label="meta" obj={opened.meta} />
-            </div>
+      {detail && (
+        <div className="border rounded p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Trace: {detail.id}</h2>
+            <Btn outlined onClick={()=>setDetail(null)}>Close</Btn>
           </div>
+          <KeyVal k="Time" v={detail.created_at} />
+          <KeyVal k="NS" v={detail.ns} />
+          <KeyVal k="Profile" v={detail.profile || "—"} />
+          <KeyVal k="Model" v={detail.model || "—"} />
+          <KeyVal k="OK" v={detail.ok ? "OK" : `FAIL: ${detail.error || ""}`} />
+          <KeyVal k="Latency" v={(detail.latency_ms ?? 0) + " ms"} />
+          <KVBlock k="Query" v={detail.query} />
+          <KVBlock k="Answer">
+            <pre className="whitespace-pre-wrap text-sm">{detail.answer || "—"}</pre>
+          </KVBlock>
+          {detail.sources && <KVBlock k="Sources"><pre className="text-xs overflow-x-auto">{JSON.stringify(detail.sources, null, 2)}</pre></KVBlock>}
+          {detail.matches && <KVBlock k="Matches"><pre className="text-xs overflow-x-auto">{JSON.stringify(detail.matches, null, 2)}</pre></KVBlock>}
+          {detail.meta && <KVBlock k="Meta"><pre className="text-xs overflow-x-auto">{JSON.stringify(detail.meta, null, 2)}</pre></KVBlock>}
         </div>
       )}
     </div>
@@ -185,41 +211,25 @@ export default function Page() {
 
 function L({label, children, full=false}:{label:string, children:React.ReactNode, full?:boolean}) {
   return (
-    <div className={`space-y-2 ${full ? 'md:col-span-2' : ''}`}>
+    <div className={`space-y-2 ${full ? "md:col-span-3" : ""}`}>
       <label className="block text-sm">{label}</label>
       {children}
     </div>
   );
 }
-function Btn({children, outlined, ...rest}:{children:React.ReactNode, outlined?:boolean} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return <button className={`px-4 py-2 rounded ${outlined ? 'border' : 'bg-black text-white'} disabled:opacity-50`} {...rest}>{children}</button>;
-}
 function Th({children}:{children:React.ReactNode}) { return <th className="p-2 text-left">{children}</th>; }
-function Td({children, className=''}:{children:React.ReactNode, className?:string}) { return <td className={`p-2 ${className}`}>{children}</td>; }
-
-function KV({k, v}:{k:string, v:string}) {
-  return (
-    <div className="grid grid-cols-12 gap-2">
-      <div className="col-span-3 text-gray-500">{k}</div>
-      <div className="col-span-9">{v}</div>
-    </div>
-  );
+function Td({children,className=""}:{children:React.ReactNode,className?:string}) { return <td className={`p-2 ${className}`}>{children}</td>; }
+function Btn({children, outlined, ...rest}:{children:React.ReactNode, outlined?:boolean} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return <button className={`px-4 py-2 rounded ${outlined ? "border" : "bg-black text-white"} disabled:opacity-50`} {...rest}>{children}</button>;
 }
-function Block({label, text}:{label:string, text:string}) {
+function KeyVal({k, v}:{k:string, v:string}) {
+  return <div className="text-sm"><span className="text-gray-500">{k}: </span><span>{v}</span></div>;
+}
+function KVBlock({k, v, children}:{k:string, v?:string, children?:React.ReactNode}) {
   return (
     <div>
-      <div className="text-gray-500 mb-1">{label}</div>
-      <pre className="whitespace-pre-wrap text-xs border rounded p-2 bg-gray-50">{text || '—'}</pre>
-    </div>
-  );
-}
-function JsonBlock({label, obj}:{label:string, obj:any}) {
-  let pretty = '—';
-  try { pretty = obj ? JSON.stringify(obj, null, 2) : '—'; } catch {}
-  return (
-    <div>
-      <div className="text-gray-500 mb-1">{label}</div>
-      <pre className="text-xs border rounded p-2 bg-gray-50 overflow-x-auto">{pretty}</pre>
+      <div className="text-sm text-gray-500 mb-1">{k}</div>
+      {children ? children : <pre className="text-sm">{v || "—"}</pre>}
     </div>
   );
 }
