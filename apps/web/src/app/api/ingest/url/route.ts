@@ -1,8 +1,8 @@
 // apps/web/src/app/api/ingest/url/route.ts
 import { NextResponse } from "next/server";
 import * as cheerio from "cheerio";
-import { chunkText } from "../../../../lib/chunk";
-import { upsertMemoriesBatch } from "../../../../lib/memories";
+import { chunkText } from "@/lib/chunk";
+import { upsertMemoriesBatch } from "@/lib/memories";
 
 export const dynamic = "force-dynamic";
 

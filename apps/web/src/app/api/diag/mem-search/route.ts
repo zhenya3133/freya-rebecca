@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { pool, withPgRetry } from "../../../../lib/db";
-import { embedMany } from "../../../../lib/embeddings";
+import { pool, withPgRetry } from "@/lib/db";
+import { embedMany } from "@/lib/embeddings";
 
 export const dynamic = "force-dynamic";
 

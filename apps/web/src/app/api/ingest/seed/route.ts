@@ -4,6 +4,7 @@ import { q } from "@/lib/db";
 import OpenAI from "openai";
 import crypto from "crypto";
 import matter from "gray-matter";
+import { requireAdmin } from "@/lib/adminAuth";
 
 export const runtime = "nodejs";
 
@@ -11,10 +12,15 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
 
 function toVecLiteral(v: number[], frac = 6) {
-  return "[" + v.map(x => Number(x).toFixed(frac)).join(",") + "]";
+  return "[" + v.map((x) => Number(x).toFixed(frac)).join(",") + "]";
 }
 
 export async function POST(req: NextRequest) {
+  // ⬇️ ДОБАВЛЕНО: защита админ-ключом ДО чтения тела
+  const unauthorized = requireAdmin(req);
+  if (unauthorized) return unauthorized;
+  // ⬆️ ДОБАВЛЕНО
+
   try {
     const body = await req.json();
     const ns: string | undefined = body?.ns;
@@ -24,7 +30,10 @@ export async function POST(req: NextRequest) {
 
     if (!ns || docs.length === 0) {
       return NextResponse.json(
-        { error: "expected { ns, docs:[{title,content}], clear?: boolean, clearAll?: boolean }" },
+        {
+          error:
+            "expected { ns, docs:[{title,content}], clear?: boolean, clearAll?: boolean }",
+        },
         { status: 400 }
       );
     }
@@ -35,7 +44,10 @@ export async function POST(req: NextRequest) {
     if (clearAll === true) {
       await q(`delete from chunks where ns = $1 and slot = 'staging'`, [ns]);
     } else if (clear === true) {
-      await q(`delete from chunks where ns = $1 and slot = 'staging' and corpus_id = $2`, [ns, corpusId]);
+      await q(
+        `delete from chunks where ns = $1 and slot = 'staging' and corpus_id = $2`,
+        [ns, corpusId]
+      );
     }
 
     // Регистрируем корпус (если ещё не был)
@@ -57,14 +69,16 @@ export async function POST(req: NextRequest) {
       // Разбор YAML фронт-маттера
       const parsed = matter(String(d?.content ?? ""));
       const cleanContent = String(parsed.content ?? "");
-      const meta = (parsed.data && typeof parsed.data === "object") ? parsed.data : {};
+      const meta =
+        parsed.data && typeof parsed.data === "object" ? parsed.data : {};
 
       // Нормализуем source
       const source = {
         title,
         path: d?.path ?? title,
-        url: d?.url ?? (typeof meta?.url === "string" ? meta.url : undefined),
-        metadata: meta
+        url:
+          d?.url ?? (typeof (meta as any)?.url === "string" ? (meta as any).url : undefined),
+        metadata: meta,
       };
 
       titles.push(title);
@@ -73,7 +87,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Эмбеддинги по очищенному контенту
-    const embRes = await openai.embeddings.create({ model: EMBED_MODEL, input: contents });
+    const embRes = await openai.embeddings.create({
+      model: EMBED_MODEL,
+      input: contents,
+    });
 
     // Вставка чанков
     let added = 0;
@@ -86,7 +103,8 @@ export async function POST(req: NextRequest) {
       const source = sources[i];
 
       // Включаем title + source в хэш для стабильной идемпотентности при пересеве
-      const hash = crypto.createHash("sha256")
+      const hash = crypto
+        .createHash("sha256")
         .update(ns + "||" + title + "||" + JSON.stringify(source) + "||" + content)
         .digest("hex");
 
@@ -104,6 +122,9 @@ export async function POST(req: NextRequest) {
       { status: 200 }
     );
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? "seed ingest failed" }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message ?? "seed ingest failed" },
+      { status: 500 }
+    );
   }
 }

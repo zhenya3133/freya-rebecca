@@ -1,0 +1,5 @@
+[
+  { "q": "Что такое lambda в MMR и как влияет на диверсификацию?", "ns": "rebecca/docs" },
+  { "q": "Как metadata попадает в БД при ingest с YAML шапкой?",    "ns": "rebecca/docs" },
+  { "q": "Чем профили qa/json/code/list/spec отличаются?",          "ns": "rebecca/docs" }
+]

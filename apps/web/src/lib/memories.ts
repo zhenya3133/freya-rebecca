@@ -1,5 +1,5 @@
 // apps/web/src/lib/memories.ts
-import { q, withPgRetry } from "./../lib/db";
+import { q, withPgRetry } from "./@/lib/db";
 import { embedMany } from "./embeddings";
 import { randomUUID } from "crypto";
 

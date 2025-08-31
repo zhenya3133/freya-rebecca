@@ -1,115 +1,36 @@
-// apps/web/src/app/api/profiles/get/route.ts
+/**
+ * src/app/api/profiles/get/route.ts
+ * GET /api/profiles/get?name=...&kind=...&tag=...&q=...
+ */
 import { NextRequest, NextResponse } from "next/server";
-import { q } from "@/lib/db";
+import { loadProfiles, filterProfiles } from "@/lib/profiles";
 
 export const runtime = "nodejs";
-
-type Row = {
-  id: string;
-  ns: string;
-  slot: "staging" | "prod";
-  created_at: string;
-  title: string | null;
-  content: string; // JSON как текст
-};
-
-function isUuidLike(s: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    s
-  );
-}
+export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   try {
-    const url = new URL(req.url);
-    const ns = (url.searchParams.get("ns") || "rebecca/profiles").trim();
-    const slot =
-      (url.searchParams.get("slot") === "prod" ? "prod" : "staging") as
-        | "staging"
-        | "prod";
+    const sp = req.nextUrl.searchParams;
+    const name = sp.get("name") ?? undefined;
+    const kind = sp.get("kind") ?? undefined;
+    const tag  = sp.get("tag") ?? undefined;
+    const q    = sp.get("q") ?? undefined;
 
-    const id = url.searchParams.get("id")?.trim() || "";
-    const name = url.searchParams.get("name")?.trim() || "";
+    const list = await loadProfiles();
+    const items = filterProfiles(list, { name, kind, tag, q });
 
-    if (!id && !name) {
-      return NextResponse.json(
-        { ok: false, error: "expected id or name" },
-        { status: 400 }
-      );
-    }
+    const body = {
+      version: "v1",
+      total: list.length,
+      count: items.length,
+      filters: { name, kind, tag, q },
+      items,
+    };
 
-    let row: Row | null = null;
-
-    if (id) {
-      if (!isUuidLike(id)) {
-        return NextResponse.json(
-          { ok: false, error: "id must be UUID" },
-          { status: 400 }
-        );
-      }
-      const r = await q<Row>(
-        `
-        select id, ns, slot, created_at,
-               (source->>'title') as title,
-               content
-        from chunks
-        where id = $1::uuid and ns = $2 and slot = $3
-        limit 1
-      `,
-        [id, ns, slot]
-      );
-      row = r?.[0] ?? null;
-    } else {
-      // По имени: сравнение без учета регистра.
-      // ВАЖНО: content::jsonb перед ->>
-      const r = await q<Row>(
-        `
-        select id, ns, slot, created_at,
-               (source->>'title') as title,
-               content
-        from chunks
-        where ns = $1 and slot = $2
-          and (
-            lower(content::jsonb->>'name') = lower($3)
-            or lower(source->>'title')     = lower($3)
-          )
-        order by created_at desc
-        limit 1
-      `,
-        [ns, slot, name]
-      );
-      row = r?.[0] ?? null;
-    }
-
-    if (!row) {
-      return NextResponse.json(
-        { ok: false, error: "profile not found", ns, slot, id, name },
-        { status: 404 }
-      );
-    }
-
-    // Попробуем распарсить JSON профиля
-    let profile: any = null;
-    try {
-      profile = JSON.parse(row.content);
-    } catch {
-      // если хранится не JSON, отдадим как есть
-      profile = row.content;
-    }
-
-    return NextResponse.json({
-      ok: true,
-      ns,
-      slot,
-      id: row.id,
-      title: row.title,
-      created_at: row.created_at,
-      profile,
-    });
+    const res = NextResponse.json(body, { status: 200 });
+    res.headers.set("Cache-Control", "public, max-age=60, s-maxage=60");
+    return res;
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "profiles/get failed" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: String(e?.message ?? e) }, { status: 500 });
   }
 }

@@ -1,12 +1,20 @@
 // apps/web/src/app/api/health/env/route.ts
+import { NextResponse } from "next/server";
+
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return new Response(
-    JSON.stringify({
-      openai_key_present: !!process.env.OPENAI_API_KEY,
-      db_url_present: !!process.env.DATABASE_URL
-    }),
-    { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } }
-  );
+  const hasDB = !!process.env.DATABASE_URL;
+  const hasOpenAI = !!process.env.OPENAI_API_KEY;
+  const hasAdminKey = !!process.env.X_ADMIN_KEY;
+
+  return NextResponse.json({
+    ok: hasDB && hasOpenAI,
+    has: {
+      DATABASE_URL: hasDB,
+      OPENAI_API_KEY: hasOpenAI,
+      X_ADMIN_KEY: hasAdminKey
+    }
+  });
 }

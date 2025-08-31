@@ -1,6 +1,6 @@
 // apps/web/src/app/api/rag/ask/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { retrieveV2 } from "@/lib/retriever_v2"; // или: "../../../../lib/retriever_v2"
+import { retrieveV2 } from "@/lib/retriever_v2"; // или: "@/lib/retriever_v2"
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

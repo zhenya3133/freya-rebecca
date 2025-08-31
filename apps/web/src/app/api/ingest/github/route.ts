@@ -1,7 +1,7 @@
 // apps/web/src/app/api/ingest/github/route.ts
 import { NextResponse } from "next/server";
-import { chunkText } from "../../../../lib/chunk";
-import { upsertMemoriesBatch } from "../../../../lib/memories";
+import { chunkText } from "@/lib/chunk";
+import { upsertMemoriesBatch } from "@/lib/memories";
 
 export const dynamic = "force-dynamic";
 

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { pool, withPgRetry } from "../../../../lib/db";
+import { pool, withPgRetry } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 

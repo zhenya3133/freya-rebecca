@@ -1,8 +1,8 @@
 // apps/web/src/app/api/ingest/youtube/route.ts
 import { NextResponse } from "next/server";
 import { YoutubeTranscript } from "youtube-transcript";
-import { chunkText } from "../../../../lib/chunk";
-import { upsertMemoriesBatch } from "../../../../lib/memories";
+import { chunkText } from "@/lib/chunk";
+import { upsertMemoriesBatch } from "@/lib/memories";
 
 export const dynamic = "force-dynamic";
 

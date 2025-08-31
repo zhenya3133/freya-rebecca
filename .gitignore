@@ -12,3 +12,6 @@ out
 # OS
 .DS_Store
 Thumbs.db
+
+# runtime payload
+apps/web/answer.json
