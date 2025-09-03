@@ -1,217 +1,445 @@
-"use client";
+'use client';
 
-import React, { useCallback, useMemo, useState } from "react";
+import * as React from 'react';
 
-type Source = { n?: number; path?: string; score?: number };
-type Match = { id?: string; path?: string; ns?: string; score?: number; preview?: string; snippet?: string };
+type Source = { n: number; path?: string; url?: string; score: number };
+type Match = { id: string; path?: string; url?: string; score: number; preview?: string };
 type RagResponse = {
-  ok?: boolean;
+  ok: boolean;
   model?: string;
-  profile?: string;
   mode?: string;
+  profile?: string;
   answer?: string;
-  error?: string;
   sources?: Source[];
   matches?: Match[];
-  logId?: string;
+  error?: string;
+  // некоторые маршруты могут возвращать logId / payload — не используем тут, но не ломаемся
+  [k: string]: any;
 };
 
-const CLIENT_TIMEOUT_MS = 12000; // 12s — клиентский таймаут, после него пробуем фолбэк
+type HistoryItem = {
+  id: string;
+  route: string;
+  ts: number;
+  ns: string;
+  profileName: string;
+  codeLang?: string;
+  maxTokens: number;
+  guarded: boolean;
+  logged: boolean;
+  timeoutMs: number;
+  query: string;
+  res?: RagResponse;
+  ms?: number;
+  err?: string;
+};
 
-async function fetchJsonWithTimeout(url: string, payload: any, timeoutMs: number) {
+const PROFILES = ['qa', 'json', 'code', 'list', 'spec'] as const;
+type ProfileName = typeof PROFILES[number];
+
+function deduceRoute(guarded: boolean, logged: boolean) {
+  if (guarded && logged) return '/api/rag/answer-logged-guarded';
+  if (guarded) return '/api/rag/answer-guarded';
+  if (logged) return '/api/rag/answer-logged';
+  return '/api/rag/answer';
+}
+
+// даём небольшой запас к таймауту, чтобы не обрывать ответ «на финишной прямой»
+async function fetchJsonWithTimeout<T>(url: string, init: RequestInit, timeoutMs: number): Promise<T> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  const budget = Math.max(1000, timeoutMs + 1500);
+  const timer = setTimeout(() => ctrl.abort(), budget);
   try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
-    const data = await r.json().catch(() => ({}));
-    return { ok: r.ok, status: r.status, data };
+    const res = await fetch(url, { ...init, signal: ctrl.signal });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text}` : ''}`);
+    }
+    return (await res.json()) as T;
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`Превышен таймаут ${timeoutMs} мс — увеличьте "Timeout, ms" и повторите.`);
+    }
+    throw err;
   } finally {
-    clearTimeout(t);
+    clearTimeout(timer);
   }
 }
 
-export default function ChatPage() {
-  const [ns, setNs] = useState("rebecca/docs");
-  const [query, setQuery] = useState("");
-  const [topK, setTopK] = useState(8);
-  const [minScore, setMinScore] = useState(0.35);
-  const [maxTokens, setMaxTokens] = useState(700);
-  const [logging, setLogging] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [resp, setResp] = useState<RagResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [usedUrl, setUsedUrl] = useState<string | null>(null);
-  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
-
-  const canSend = useMemo(
-    () => query.trim().length > 0 && ns.trim().length > 0 && !busy,
-    [query, ns, busy]
-  );
-
-  const onSubmit = useCallback(async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!canSend) return;
-
-    const payload = { query, ns, topK, minScore, maxTokens };
-
-    setBusy(true);
-    setError(null);
-    setResp(null);
-    setUsedUrl(null);
-    setElapsedMs(null);
-
-    const started = Date.now();
-
-    // 1) пробуем логируемый guarded, если включен тумблер
-    if (logging) {
-      const r1 = await fetchJsonWithTimeout("/api/rag/answer-logged-guarded", payload, CLIENT_TIMEOUT_MS)
-        .catch((e: any) => ({ ok: false, status: 0, data: { error: String(e?.name === "AbortError" ? `Timeout ${CLIENT_TIMEOUT_MS}ms` : e?.message || e) } }));
-
-      if (r1.ok) {
-        setResp(r1.data);
-        setUsedUrl("/api/rag/answer-logged-guarded");
-        setElapsedMs(Date.now() - started);
-        setBusy(false);
-        return;
-      }
-
-      // фолбэк условия: 403 (логи выключены), 504/502/408, 0 (сетевая/Abort), любое r1.ok=false
-      const shouldFallback = [0, 403, 408, 502, 504].includes(r1.status);
-      if (!shouldFallback) {
-        // если это другая ошибка (например, 400 валидация) — покажем её и выйдем
-        setError(r1.data?.error || `HTTP ${r1.status}`);
-        setUsedUrl("/api/rag/answer-logged-guarded");
-        setElapsedMs(Date.now() - started);
-        setBusy(false);
-        return;
-      }
+function useLocalStorage<T>(key: string, initial: T) {
+  const [val, setVal] = React.useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : initial;
+    } catch {
+      return initial;
     }
+  });
+  React.useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(val));
+    } catch {}
+  }, [key, val]);
+  return [val, setVal] as const;
+}
 
-    // 2) фолбэк на обычный guarded
-    const r2 = await fetchJsonWithTimeout("/api/rag/answer-guarded", payload, CLIENT_TIMEOUT_MS)
-      .catch((e: any) => ({ ok: false, status: 0, data: { error: String(e?.name === "AbortError" ? `Timeout ${CLIENT_TIMEOUT_MS}ms` : e?.message || e) } }));
+export default function ChatPage() {
+  // form state
+  const [ns, setNs] = useLocalStorage('chat.ns', 'rebecca/docs');
+  const [profileName, setProfileName] = useLocalStorage<ProfileName>('chat.profile', 'qa');
+  const [codeLang, setCodeLang] = useLocalStorage('chat.codeLang', 'typescript');
+  const [query, setQuery] = useLocalStorage('chat.query', 'Кратко: что делает Rebecca.Docs?');
+  const [maxTokens, setMaxTokens] = useLocalStorage<number>('chat.maxTokens', 450);
+  const [timeoutMs, setTimeoutMs] = useLocalStorage<number>('chat.timeoutMs', 18000);
+  const [guarded, setGuarded] = useLocalStorage<boolean>('chat.guarded', true);
+  const [logged, setLogged] = useLocalStorage<boolean>('chat.logged', true);
 
-    setUsedUrl("/api/rag/answer-guarded");
-    setElapsedMs(Date.now() - started);
+  // runtime
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+  const [answer, setAnswer] = React.useState<string>('');
+  const [sources, setSources] = React.useState<Source[]>([]);
+  const [matches, setMatches] = React.useState<Match[]>([]);
+  const [model, setModel] = React.useState<string>('');
+  const [routeUsed, setRouteUsed] = React.useState<string>('');
 
-    if (r2.ok) setResp(r2.data);
-    else setError(r2.data?.error || `HTTP ${r2.status}`);
+  // history
+  const [history, setHistory] = useLocalStorage<HistoryItem[]>('chat.history', []);
 
-    setBusy(false);
-  }, [canSend, logging, query, ns, topK, minScore, maxTokens]);
+  const ask = async () => {
+    setErr(null);
+    setLoading(true);
+    setAnswer('');
+    setSources([]);
+    setMatches([]);
+    setModel('');
+    const route = deduceRoute(guarded, logged);
+    setRouteUsed(route);
+
+    // разные роуты исторически принимали и profile, и profileName — передадим оба, чтобы не зависеть от версии
+    const body: any = {
+      ns,
+      query,
+      profileName,
+      profile: profileName,
+      codeLang,
+      maxTokens,
+    };
+
+    const started = performance.now();
+    try {
+      const res = await fetchJsonWithTimeout<RagResponse>(
+        route,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        timeoutMs
+      );
+      const ms = Math.round(performance.now() - started);
+      setModel(res.model ?? '');
+      setAnswer(res.answer ?? '');
+      setSources(res.sources ?? []);
+      setMatches(res.matches ?? []);
+      setHistory((prev) => [
+        {
+          id: crypto.randomUUID(),
+          route,
+          ts: Date.now(),
+          ns,
+          profileName,
+          codeLang,
+          maxTokens,
+          guarded,
+          logged,
+          timeoutMs,
+          query,
+          res,
+          ms,
+        },
+        ...prev.slice(0, 24),
+      ]);
+    } catch (e: any) {
+      const ms = Math.round(performance.now() - started);
+      const message = e?.message ? String(e.message) : 'Unknown error';
+      setErr(message);
+      setHistory((prev) => [
+        {
+          id: crypto.randomUUID(),
+          route,
+          ts: Date.now(),
+          ns,
+          profileName,
+          codeLang,
+          maxTokens,
+          guarded,
+          logged,
+          timeoutMs,
+          query,
+          err: message,
+          ms,
+        },
+        ...prev.slice(0, 24),
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const reset = () => {
+    setAnswer('');
+    setSources([]);
+    setMatches([]);
+    setErr(null);
+    setModel('');
+    setRouteUsed('');
+  };
+
+  const loadFromHistory = (h: HistoryItem) => {
+    setNs(h.ns);
+    setProfileName(h.profileName as ProfileName);
+    setCodeLang(h.codeLang ?? 'typescript');
+    setMaxTokens(h.maxTokens);
+    setTimeoutMs(h.timeoutMs);
+    setGuarded(h.guarded);
+    setLogged(h.logged);
+    setQuery(h.query);
+    reset();
+  };
+
+  const copyAnswer = async () => {
+    try {
+      await navigator.clipboard.writeText(answer || '');
+      alert('Ответ скопирован в буфер обмена');
+    } catch {
+      alert('Не удалось скопировать');
+    }
+  };
 
   return (
-    <div className="min-h-screen p-6 max-w-5xl mx-auto">
-      <h1 className="text-2xl font-semibold mb-4">Chat · RAG (guarded)</h1>
+    <div style={{ padding: 16, fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif' }}>
+      <h1 style={{ marginTop: 0 }}>Chat · RAG с профилями</h1>
 
-      <form onSubmit={onSubmit} className="space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="col-span-1">
-            <label className="block text-sm font-medium mb-1">Namespace (ns)</label>
-            <input className="w-full border rounded-xl px-3 py-2" value={ns} onChange={(e) => setNs(e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">topK</label>
-            <input type="number" min={1} max={20} className="w-full border rounded-xl px-3 py-2"
-                   value={topK} onChange={(e) => setTopK(parseInt(e.target.value || "8", 10))}/>
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">minScore</label>
-            <input type="number" step="0.01" min={0} max={1}
-                   className="w-full border rounded-xl px-3 py-2"
-                   value={minScore} onChange={(e) => setMinScore(parseFloat(e.target.value || "0.35"))}/>
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">maxTokens</label>
-            <input type="number" min={1} max={8192} className="w-full border rounded-xl px-3 py-2"
-                   value={maxTokens} onChange={(e) => setMaxTokens(parseInt(e.target.value || "700", 10))}/>
-          </div>
-          <div className="flex items-end">
-            <label className="inline-flex items-center space-x-2">
-              <input type="checkbox" checked={logging} onChange={(e) => setLogging(e.target.checked)} />
-              <span>Логировать запрос (answer-logged-guarded)</span>
-            </label>
-          </div>
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'center', maxWidth: 980 }}>
+        <label>
+          <div>Namespace (ns)</div>
+          <input value={ns} onChange={(e) => setNs(e.target.value)} style={{ width: '100%' }} />
+        </label>
 
-        <div>
-          <label className="block text-sm font-medium mb-1">Запрос</label>
+        <label>
+          <div>Профиль</div>
+          <select
+            value={profileName}
+            onChange={(e) => setProfileName(e.target.value as ProfileName)}
+            style={{ width: '100%' }}
+          >
+            {PROFILES.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label style={{ gridColumn: '1 / -1' }}>
+          <div>Вопрос</div>
           <textarea
-            className="w-full border rounded-xl px-3 py-2 min-h-[120px]"
-            placeholder="Задайте вопрос к выбранному ns…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            rows={3}
+            style={{ width: '100%', resize: 'vertical' }}
           />
-        </div>
+        </label>
 
-        <div className="flex items-center gap-3">
-          <button type="submit" disabled={!canSend} className="rounded-2xl px-4 py-2 border shadow disabled:opacity-50">
-            {busy ? "Отправка…" : "Отправить"}
-          </button>
-          {usedUrl && (
-            <span className="text-sm opacity-70">
-              {elapsedMs != null ? `${elapsedMs}ms · ` : ""}{usedUrl}
-            </span>
-          )}
-        </div>
-      </form>
+        <label>
+          <div>Timeout, ms</div>
+          <input
+            type="number"
+            min={1000}
+            step={500}
+            value={timeoutMs}
+            onChange={(e) => setTimeoutMs(Number(e.target.value || 0))}
+          />
+        </label>
 
-      {error && (
-        <div className="mt-4 p-3 border border-red-300 rounded-xl bg-red-50 text-red-800">
-          Ошибка: {error}
+        <label>
+          <div>maxTokens</div>
+          <input
+            type="number"
+            min={64}
+            step={50}
+            value={maxTokens}
+            onChange={(e) => setMaxTokens(Number(e.target.value || 0))}
+          />
+        </label>
+
+        <label>
+          <div>Guarded</div>
+          <input type="checkbox" checked={guarded} onChange={(e) => setGuarded(e.target.checked)} />
+        </label>
+
+        <label>
+          <div>Logged</div>
+          <input type="checkbox" checked={logged} onChange={(e) => setLogged(e.target.checked)} />
+        </label>
+
+        {profileName === 'code' && (
+          <label>
+            <div>Язык кода</div>
+            <input value={codeLang} onChange={(e) => setCodeLang(e.target.value)} />
+          </label>
+        )}
+      </div>
+
+      <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+        <button onClick={ask} disabled={loading} style={{ padding: '6px 12px' }}>
+          {loading ? 'Ждём…' : 'Спросить'}
+        </button>
+        <button onClick={reset} disabled={loading} style={{ padding: '6px 12px' }}>
+          Сброс
+        </button>
+        <button onClick={copyAnswer} disabled={!answer} style={{ padding: '6px 12px' }}>
+          Копировать ответ
+        </button>
+      </div>
+
+      {/* статус/диагностика */}
+      <div style={{ marginTop: 8, color: '#666' }}>
+        {routeUsed ? <span>Маршрут: <code>{routeUsed}</code> · </span> : null}
+        {model ? <span>Модель: <code>{model}</code> · </span> : null}
+        {loading ? <span>Выполняется запрос…</span> : null}
+      </div>
+
+      {/* ошибка */}
+      {err && (
+        <div style={{ marginTop: 12, padding: 12, background: '#ffeaea', border: '1px solid #f5c2c2' }}>
+          <b>Ошибка:</b> {err}
         </div>
       )}
 
-      {resp && (
-        <div className="mt-6 space-y-4">
-          <div className="p-4 border rounded-2xl bg-white">
-            <div className="text-sm text-gray-600 mb-1">
-              {resp.model ? `model: ${resp.model}` : null}
-              {resp.profile ? ` · profile: ${resp.profile}` : null}
-              {resp.mode ? ` · mode: ${resp.mode}` : null}
-              {resp.logId ? ` · logId: ${resp.logId}` : null}
-            </div>
-            <div className="whitespace-pre-wrap text-base">{resp.answer || resp.error || "—"}</div>
+      {/* ответ */}
+      {answer && (
+        <div style={{ marginTop: 16 }}>
+          <h3 style={{ marginBottom: 8 }}>Ответ</h3>
+          <pre
+            style={{
+              whiteSpace: 'pre-wrap',
+              background: '#fafafa',
+              border: '1px solid #eee',
+              padding: 12,
+              borderRadius: 6,
+            }}
+          >
+            {answer}
+          </pre>
+        </div>
+      )}
+
+      {/* источники */}
+      {!!sources?.length && (
+        <div style={{ marginTop: 16 }}>
+          <h3 style={{ marginBottom: 8 }}>Источники</h3>
+          <ol style={{ paddingLeft: 20 }}>
+            {sources.map((s) => (
+              <li key={s.n} style={{ marginBottom: 6 }}>
+                <div>
+                  {s.url ? (
+                    <a href={s.url} target="_blank" rel="noreferrer">
+                      {s.path || s.url}
+                    </a>
+                  ) : (
+                    <span>{s.path || `[#${s.n}]`}</span>
+                  )}{' '}
+                  <span style={{ color: '#999' }}>· score {s.score.toFixed(3)}</span>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {/* совпадения (превью) */}
+      {!!matches?.length && (
+        <div style={{ marginTop: 16 }}>
+          <h3 style={{ marginBottom: 8 }}>Совпадения (превью)</h3>
+          <ul style={{ paddingLeft: 18 }}>
+            {matches.map((m) => (
+              <li key={m.id} style={{ marginBottom: 8 }}>
+                <div>
+                  <b>{m.path || m.id}</b>{' '}
+                  <span style={{ color: '#999' }}>· {m.score?.toFixed?.(3)}</span>
+                  {m.url ? (
+                    <>
+                      {' · '}
+                      <a href={m.url} target="_blank" rel="noreferrer">
+                        открыть
+                      </a>
+                    </>
+                  ) : null}
+                </div>
+                {m.preview ? (
+                  <div style={{ color: '#444', marginTop: 4, whiteSpace: 'pre-wrap' }}>{m.preview}</div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* история */}
+      <div style={{ marginTop: 24 }}>
+        <h3 style={{ marginBottom: 8 }}>История (последние 25)</h3>
+        {!history.length && <div style={{ color: '#777' }}>Пока пусто.</div>}
+        {!!history.length && (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ borderCollapse: 'collapse', minWidth: 720 }}>
+              <thead>
+                <tr>
+                  {['Время', 'Маршрут', 'ns', 'Профиль', 'Q', 'ms', 'Статус', 'Действия'].map((h) => (
+                    <th key={h} style={{ textAlign: 'left', borderBottom: '1px solid #ddd', padding: '6px 8px' }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((h) => (
+                  <tr key={h.id}>
+                    <td style={{ padding: '6px 8px', color: '#666' }}>
+                      {new Date(h.ts).toLocaleTimeString()}
+                    </td>
+                    <td style={{ padding: '6px 8px' }}>
+                      <code>{h.route.replace('/api/rag/', '')}</code>
+                    </td>
+                    <td style={{ padding: '6px 8px' }}>{h.ns}</td>
+                    <td style={{ padding: '6px 8px' }}>
+                      {h.profileName}
+                      {h.profileName === 'code' ? ` (${h.codeLang})` : ''}
+                    </td>
+                    <td style={{ padding: '6px 8px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {h.query}
+                    </td>
+                    <td style={{ padding: '6px 8px' }}>{h.ms ?? '—'}</td>
+                    <td style={{ padding: '6px 8px' }}>
+                      {h.err ? (
+                        <span style={{ color: '#c00' }} title={h.err}>error</span>
+                      ) : (
+                        <span style={{ color: '#0a0' }}>{h.res?.mode ?? 'ok'}</span>
+                      )}
+                    </td>
+                    <td style={{ padding: '6px 8px' }}>
+                      <button onClick={() => loadFromHistory(h)} style={{ padding: '2px 8px' }}>
+                        В форму
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-
-          {resp.sources && resp.sources.length > 0 && (
-            <div className="p-4 border rounded-2xl bg-white">
-              <h2 className="font-medium mb-2">Sources</h2>
-              <ul className="list-disc ml-5 space-y-1">
-                {resp.sources.map((s, i) => (
-                  <li key={i} className="text-sm">
-                    <span className="font-mono">#{s.n ?? i + 1}</span> · {s.path ?? "—"}
-                    {typeof s.score === "number" ? <span className="opacity-70"> (score: {s.score.toFixed(3)})</span> : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {resp.matches && resp.matches.length > 0 && (
-            <div className="p-4 border rounded-2xl bg-white">
-              <h2 className="font-medium mb-2">Matches</h2>
-              <ul className="space-y-3">
-                {resp.matches.map((m, i) => (
-                  <li key={m.id ?? i} className="text-sm border rounded-xl p-2">
-                    <div className="text-gray-700">
-                      <span className="font-mono">{m.id?.slice(0, 8) ?? i + 1}</span>
-                      {m.path ? <> · <span className="font-semibold">{m.path}</span></> : null}
-                      {typeof m.score === "number" ? <span className="opacity-70"> (score: {m.score.toFixed(3)})</span> : null}
-                    </div>
-                    <div className="opacity-80 whitespace-pre-wrap">{m.preview ?? m.snippet ?? ""}</div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

@@ -1,104 +1,91 @@
-// apps/web/src/app/api/ingest/url/route.ts
 import { NextResponse } from "next/server";
-import * as cheerio from "cheerio";
-import { chunkText } from "@/lib/chunk";
+import { JSDOM } from "jsdom";
+import { Readability } from "@mozilla/readability";
+import { embedMany } from "@/lib/embeddings";
 import { upsertMemoriesBatch } from "@/lib/memories";
+import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
 
-export const dynamic = "force-dynamic";
+type Body = {
+  ns: string;
+  url: string;
+  kind?: "web";
+  asMarkdown?: boolean; // парсить как «чистый текст» (Readability)
+  chunk?: { chars?: number; overlap?: number };
+  minChars?: number; // минимальный допуск длины текста (по умолчанию 160)
+};
 
-async function fetchWithFallback(url: string) {
-  // 1) обычный fetch как браузер
-  const res = await fetch(url, {
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-      accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "accept-language": "en-US,en;q=0.9,ru;q=0.8",
-    },
-  });
-  if (res.ok) {
-    const html = await res.text();
-    return { html, from: "origin" as const };
-  }
-
-  // 2) fallback: r.jina.ai (читабельная версия страницы)
-  const jinaUrl =
-    "https://r.jina.ai/http://" + url.replace(/^https?:\/\//i, "");
-  const jr = await fetch(jinaUrl, { headers: { "user-agent": "curl/8" } });
-  if (jr.ok) {
-    const text = await jr.text(); // уже очищенный текст
-    // упакуем как минимальный HTML, чтобы единый пайп ниже работал
-    const html = `<article>${text.replace(/\n/g, "<br/>")}</article>`;
-    return { html, from: "jina" as const };
-  }
-
-  throw new Error(`fetch failed: ${res.status}; jina: ${jr.status}`);
+function extractMainText(html: string, url: string) {
+  const dom = new JSDOM(html, { url });
+  const article = new Readability(dom.window.document).parse();
+  const raw = article?.textContent || dom.window.document.body.textContent || "";
+  return raw.replace(/\s+\n/g, "\n").replace(/\n{2,}/g, "\n\n").trim();
 }
 
-/**
- * POST /api/ingest/url
- * Body: { url: string; kind: string; chunk?: { size?: number; overlap?: number; minSize?: number } }
- * Требует заголовок: x-admin-key
- */
 export async function POST(req: Request) {
+  const stage = { value: "init" as
+    | "init"
+    | "fetch"
+    | "extract"
+    | "chunking"
+    | "embedding"
+    | "saving" };
+
   try {
-    const { url, kind, chunk } = (await req.json()) as {
-      url?: string;
-      kind?: string;
-      chunk?: { size?: number; overlap?: number; minSize?: number };
-    };
-    if (!url || !kind)
+    const body = (await req.json()) as Body;
+    const ns = body?.ns?.trim();
+    const url = body?.url?.trim();
+    const asMarkdown = body?.asMarkdown !== false; // по умолчанию включено
+
+    if (!ns || !url) {
+      return NextResponse.json({ ok: false, error: "ns and url are required" }, { status: 400 });
+    }
+
+    stage.value = "fetch";
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) {
+      return NextResponse.json({ ok: false, error: `fetch failed (${res.status})` }, { status: 502 });
+    }
+
+    stage.value = "extract";
+    const html = await res.text();
+    const rawText = asMarkdown ? extractMainText(html, url) : html;
+
+    const minChars = Number.isFinite(body?.minChars) ? Math.max(0, Number(body!.minChars)) : 160;
+    if ((rawText?.length ?? 0) < minChars) {
       return NextResponse.json(
-        { ok: false, error: "url and kind are required" },
+        { ok: false, error: `content too short (${rawText?.length ?? 0})`, stage: "extract" },
         { status: 400 }
-      );
-
-    const { html, from } = await fetchWithFallback(url);
-    const $ = cheerio.load(html);
-
-    $("script, style, noscript, svg, iframe, footer, nav").remove();
-    const title =
-      $("title").first().text().trim() ||
-      $("h1").first().text().trim() ||
-      url;
-
-    const root =
-      $("article, main, #content, .content").first().length
-        ? $("article, main, #content, .content").first()
-        : $("body");
-    const text = root.text().replace(/\n{3,}/g, "\n\n").replace(/[ \t]+\n/g, "\n").trim();
-
-    if (!text || text.length < 200) {
-      return NextResponse.json(
-        { ok: false, error: `content too short (${text?.length ?? 0})` },
-        { status: 422 }
       );
     }
 
-    const pieces = chunkText(text, {
-      size: chunk?.size ?? 1500,
-      overlap: chunk?.overlap ?? 200,
-      minSize: chunk?.minSize ?? 400,
-    });
-    const items = pieces.map((content, idx) => ({
+    stage.value = "chunking";
+    const chunks = chunkText(rawText, body?.chunk);
+    if (chunks.length === 0) {
+      return NextResponse.json({ ok: false, error: "empty after chunking", stage: "chunking" }, { status: 400 });
+    }
+
+    stage.value = "embedding";
+    const embeddings = await embedMany(chunks);
+
+    stage.value = "saving";
+    const rows = chunks.map((content, i) => ({
+      ns,
+      kind: "web" as const,
       content,
-      metadata: { source_type: "url", url, title, from, chunk_index: idx },
+      embedding: embeddings[i],
+      metadata: { url, extractor: asMarkdown ? "readability" : "raw-html", chunk: normalizeChunkOpts(body?.chunk) }
     }));
 
-    const inserted = await upsertMemoriesBatch(kind, items);
+    await upsertMemoriesBatch(rows as any);
+
     return NextResponse.json({
       ok: true,
-      inserted,
-      count: inserted.length,
-      kind,
-      title,
-      from,
+      inserted: rows.length,
+      preview: { len: rawText.length, first: chunks[0]?.slice(0, 140) ?? "" }
     });
-  } catch (e: any) {
-    console.error("POST /api/ingest/url error:", e?.message ?? e);
+  } catch (err: any) {
     return NextResponse.json(
-      { ok: false, error: String(e?.message ?? e) },
+      { ok: false, error: err?.message || String(err), stage: stage.value },
       { status: 500 }
     );
   }

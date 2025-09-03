@@ -1,57 +1,49 @@
-// apps/web/src/app/api/ingest/youtube/route.ts
 import { NextResponse } from "next/server";
-import { YoutubeTranscript } from "youtube-transcript";
-import { chunkText } from "@/lib/chunk";
+import { embedMany } from "@/lib/embeddings";
 import { upsertMemoriesBatch } from "@/lib/memories";
+import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
 
-export const dynamic = "force-dynamic";
+type Body = {
+  ns: string;
+  videoId?: string;   // опционально, если сами тянете транскрипт снаружи
+  transcript?: string; // готовый текст транскрипта
+  chunk?: { chars?: number; overlap?: number };
+};
 
-/**
- * POST /api/ingest/youtube
- * Body: { urlOrId: string; kind: string; lang?: string; chunk?: { size?: number; overlap?: number; minSize?: number } }
- * Требует заголовок: x-admin-key
- */
 export async function POST(req: Request) {
+  const stage = { value: "init" as "init" | "validate" | "chunking" | "embedding" | "saving" };
+
   try {
-    const { urlOrId, kind, lang, chunk } = await req.json() as {
-      urlOrId?: string; kind?: string; lang?: string; chunk?: { size?: number; overlap?: number; minSize?: number };
-    };
-    if (!urlOrId || !kind) return NextResponse.json({ ok:false, error:"urlOrId and kind are required" }, { status:400 });
+    const b = (await req.json()) as Body;
+    const ns = b?.ns?.trim();
+    const transcript = (b?.transcript ?? "").toString();
 
-    // получаем субтитры (автоязык/указанный)
-    let transcript;
-    try {
-      transcript = await YoutubeTranscript.fetchTranscript(urlOrId, lang ? { lang } : undefined);
-    } catch (e) {
-      return NextResponse.json({ ok:false, error:"no transcript available" }, { status:422 });
+    if (!ns || !transcript) {
+      return NextResponse.json({ ok: false, error: "ns and transcript are required" }, { status: 400 });
     }
 
-    const text = transcript.map(t => t.text).join(" ").replace(/\s+/g, " ").trim();
-    if (!text || text.length < 200) {
-      return NextResponse.json({ ok:false, error:"transcript too short" }, { status:422 });
+    stage.value = "chunking";
+    const chunks = chunkText(transcript, b?.chunk);
+    if (chunks.length === 0) {
+      return NextResponse.json({ ok: false, error: "empty after chunking", stage: "chunking" }, { status: 400 });
     }
 
-    // попробуем получить title через oEmbed (без ключа)
-    let title: string | undefined;
-    try {
-      const id = urlOrId.includes("http") ? new URL(urlOrId).searchParams.get("v") : urlOrId;
-      const oembed = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`);
-      if (oembed.ok) {
-        const data = await oembed.json() as any;
-        title = data?.title;
-      }
-    } catch {}
+    stage.value = "embedding";
+    const embeddings = await embedMany(chunks);
 
-    const pieces = chunkText(text, { size: chunk?.size ?? 1500, overlap: chunk?.overlap ?? 200, minSize: chunk?.minSize ?? 400 });
-    const items = pieces.map((content, idx) => ({
+    stage.value = "saving";
+    const rows = chunks.map((content, i) => ({
+      ns,
+      kind: "youtube" as const,
       content,
-      metadata: { source_type: "youtube", urlOrId, lang: lang ?? "auto", title, chunk_index: idx }
+      embedding: embeddings[i],
+      metadata: { videoId: b?.videoId, chunk: normalizeChunkOpts(b?.chunk) }
     }));
 
-    const inserted = await upsertMemoriesBatch(kind, items);
-    return NextResponse.json({ ok:true, inserted, count: inserted.length, kind, title });
-  } catch (e:any) {
-    console.error("POST /api/ingest/youtube error:", e?.message ?? e);
-    return NextResponse.json({ ok:false, error:String(e?.message ?? e) }, { status:500 });
+    await upsertMemoriesBatch(rows as any);
+
+    return NextResponse.json({ ok: true, inserted: rows.length });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: err?.message || String(err), stage: stage.value }, { status: 500 });
   }
 }

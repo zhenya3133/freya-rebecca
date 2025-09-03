@@ -1,58 +1,57 @@
 // apps/web/src/app/api/admin/logs/list/route.ts
-// GET /api/admin/logs/list?limit=10&ns=...&kind=...&kindPrefix=...&since=ISO
 import { NextRequest, NextResponse } from "next/server";
 import { q } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function normKind(v?: string | null) {
-  if (!v) return undefined;
-  return v.replace(/-/g, ".").trim();
-}
-
+/**
+ * GET /api/admin/logs/list
+ * Параметры (все опциональны, но авторизация обязателена через middleware):
+ *   limit   : number (1..200, по умолчанию 20)
+ *   ns      : string
+ *   kind    : string
+ *   profile : string
+ *   since   : ISO-датавремя (вернём логи >= since)
+ */
 export async function GET(req: NextRequest) {
   try {
-    // мидлвар уже проверил x-admin-key / Authorization, сюда дошли только авторизованные
     const sp = req.nextUrl.searchParams;
-    const limit = Math.min(Math.max(parseInt(sp.get("limit") || "10", 10), 1), 100);
-    const ns = sp.get("ns") || undefined;
 
-    const kindExact = normKind(sp.get("kind"));
-    const kindPrefix = normKind(sp.get("kindPrefix"));
-    const since = sp.get("since") || undefined; // ISO строка, опционально
+    const limitRaw = Number(sp.get("limit") ?? 20);
+    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 20));
 
-    let sql = `
+    const ns = sp.get("ns") ?? undefined;
+    const kind = sp.get("kind") ?? undefined;
+    const profile = sp.get("profile") ?? undefined;
+    const since = sp.get("since") ?? undefined;
+
+    const where: string[] = [];
+    const params: any[] = [];
+
+    const add = (clause: string, value: any) => {
+      params.push(value);
+      where.push(clause.replace("$$", `$${params.length}`));
+    };
+
+    if (ns) add("ns = $$", ns);
+    if (kind) add("kind = $$", kind);
+    if (profile) add("profile = $$", profile);
+    if (since) add("created_at >= $$", new Date(since));
+
+    // LIMIT как последний параметр
+    params.push(limit);
+    const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+
+    const sql = `
       select id, kind, ns, profile, params, request, response, created_at
       from logs
-      where 1=1
+      ${whereSql}
+      order by created_at desc
+      limit $${params.length}
     `;
-    const args: any[] = [];
 
-    if (ns) {
-      args.push(ns);
-      sql += ` and ns = $${args.length}`;
-    }
-
-    if (kindExact) {
-      args.push(kindExact);
-      sql += ` and kind = $${args.length}`;
-    }
-
-    if (kindPrefix) {
-      args.push(kindPrefix + "%");
-      sql += ` and kind like $${args.length}`;
-    }
-
-    if (since) {
-      args.push(new Date(since));
-      sql += ` and created_at >= $${args.length}`;
-    }
-
-    args.push(limit);
-    sql += ` order by created_at desc limit $${args.length}`;
-
-    const rows = await q(sql, args);
+    const rows = await q(sql, params);
 
     return NextResponse.json({ ok: true, count: rows.length, items: rows }, { status: 200 });
   } catch (e: any) {

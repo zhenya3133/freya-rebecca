@@ -1,130 +1,77 @@
-// apps/web/src/app/api/ingest/seed/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { q } from "@/lib/db";
-import OpenAI from "openai";
-import crypto from "crypto";
-import matter from "gray-matter";
-import { requireAdmin } from "@/lib/adminAuth";
+import { NextResponse } from "next/server";
+import { embedMany } from "@/lib/embeddings";
+import { upsertMemoriesBatch } from "@/lib/memories";
+import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
 
-export const runtime = "nodejs";
+type SeedItem = {
+  title?: string;
+  content: string;
+};
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
+type Body = {
+  ns: string;
+  items: SeedItem[];
+  chunk?: { chars?: number; overlap?: number };
+  minChars?: number; // дефолт 64 — сиды бывают короткими
+};
 
-function toVecLiteral(v: number[], frac = 6) {
-  return "[" + v.map((x) => Number(x).toFixed(frac)).join(",") + "]";
-}
-
-export async function POST(req: NextRequest) {
-  // ⬇️ ДОБАВЛЕНО: защита админ-ключом ДО чтения тела
-  const unauthorized = requireAdmin(req);
-  if (unauthorized) return unauthorized;
-  // ⬆️ ДОБАВЛЕНО
+export async function POST(req: Request) {
+  const stage = { value: "init" as "init" | "validate" | "chunking" | "embedding" | "saving" };
 
   try {
-    const body = await req.json();
-    const ns: string | undefined = body?.ns;
-    const docs: any[] = Array.isArray(body?.docs) ? body.docs : [];
-    const clear: boolean = body?.clear === true;
-    const clearAll: boolean = body?.clearAll === true;
+    const body = (await req.json()) as Body;
+    const ns = body?.ns?.trim();
+    const items = Array.isArray(body?.items) ? body.items : [];
 
-    if (!ns || docs.length === 0) {
-      return NextResponse.json(
-        {
-          error:
-            "expected { ns, docs:[{title,content}], clear?: boolean, clearAll?: boolean }",
-        },
-        { status: 400 }
-      );
+    if (!ns || items.length === 0) {
+      return NextResponse.json({ ok: false, error: "ns and items[] are required" }, { status: 400 });
     }
 
-    const corpusId = `seed:${ns}`;
+    stage.value = "validate";
+    const minChars = Number.isFinite(body?.minChars) ? Math.max(0, Number(body!.minChars)) : 64;
 
-    // Очистка
-    if (clearAll === true) {
-      await q(`delete from chunks where ns = $1 and slot = 'staging'`, [ns]);
-    } else if (clear === true) {
-      await q(
-        `delete from chunks where ns = $1 and slot = 'staging' and corpus_id = $2`,
-        [ns, corpusId]
-      );
+    const texts: { content: string; meta: any }[] = [];
+    for (const it of items) {
+      const title = it?.title?.trim();
+      const content = (it?.content ?? "").toString();
+      if (content.length < minChars) {
+        return NextResponse.json(
+          { ok: false, error: "content too short", stage: "validate", debug: { title, len: content.length } },
+          { status: 400 }
+        );
+      }
+      texts.push({ content, meta: { title } });
     }
 
-    // Регистрируем корпус (если ещё не был)
-    await q(
-      `insert into corpus_registry (id, ns, owner, license, update_cadence, source_list, half_life_days, ttl_days, created_at, updated_at)
-       values ($1, $2, $3, 'internal', 'manual', $4::jsonb, 180, 365, now(), now())
-       on conflict (id) do nothing`,
-      [corpusId, ns, "dev", JSON.stringify([])]
-    );
-
-    // Подготовим массивы чистого текста и источников с метаданными
-    const contents: string[] = [];
-    const titles: string[] = [];
-    const sources: any[] = [];
-
-    for (const d of docs) {
-      const title = String(d?.title ?? "seed");
-
-      // Разбор YAML фронт-маттера
-      const parsed = matter(String(d?.content ?? ""));
-      const cleanContent = String(parsed.content ?? "");
-      const meta =
-        parsed.data && typeof parsed.data === "object" ? parsed.data : {};
-
-      // Нормализуем source
-      const source = {
-        title,
-        path: d?.path ?? title,
-        url:
-          d?.url ?? (typeof (meta as any)?.url === "string" ? (meta as any).url : undefined),
-        metadata: meta,
-      };
-
-      titles.push(title);
-      contents.push(cleanContent);
-      sources.push(source);
+    stage.value = "chunking";
+    const allChunks: { content: string; meta: any }[] = [];
+    for (const t of texts) {
+      const chunks = chunkText(t.content, body?.chunk);
+      if (chunks.length === 0) {
+        return NextResponse.json(
+          { ok: false, error: "Invalid after chunking", stage: "chunking", debug: t.meta },
+          { status: 400 }
+        );
+      }
+      chunks.forEach((c, idx) => allChunks.push({ content: c, meta: { ...t.meta, part: idx + 1 } }));
     }
 
-    // Эмбеддинги по очищенному контенту
-    const embRes = await openai.embeddings.create({
-      model: EMBED_MODEL,
-      input: contents,
-    });
+    stage.value = "embedding";
+    const embeddings = await embedMany(allChunks.map((c) => c.content));
 
-    // Вставка чанков
-    let added = 0;
-    for (let i = 0; i < contents.length; i++) {
-      const id = crypto.randomUUID();
-      const content = contents[i];
-      const title = titles[i];
-      const emb = embRes.data[i].embedding as unknown as number[];
-      const vec = toVecLiteral(emb, 6);
-      const source = sources[i];
+    stage.value = "saving";
+    const rows = allChunks.map((c, i) => ({
+      ns,
+      kind: "seed" as const,
+      content: c.content,
+      embedding: embeddings[i],
+      metadata: { ...c.meta, chunk: normalizeChunkOpts(body?.chunk) }
+    }));
 
-      // Включаем title + source в хэш для стабильной идемпотентности при пересеве
-      const hash = crypto
-        .createHash("sha256")
-        .update(ns + "||" + title + "||" + JSON.stringify(source) + "||" + content)
-        .digest("hex");
+    await upsertMemoriesBatch(rows as any);
 
-      await q(
-        `insert into chunks (id, corpus_id, ns, slot, content, embedding, source, content_hash, created_at)
-         values ($1, $2, $3, 'staging', $4, $5::vector, $6::jsonb, $7, now())
-         on conflict do nothing`,
-        [id, corpusId, ns, content, vec, JSON.stringify(source), hash]
-      );
-      added++;
-    }
-
-    return NextResponse.json(
-      { ns, corpusId, added, slot: "staging", cleared: !!clear, clearedAll: !!clearAll },
-      { status: 200 }
-    );
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message ?? "seed ingest failed" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: true, inserted: rows.length });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: err?.message || String(err), stage: stage.value }, { status: 500 });
   }
 }

@@ -9,10 +9,10 @@ export type ModelParams = {
 };
 
 export type AppliedProfile = {
-  profileName: string;  // выбранное имя профиля
-  system: string;       // persona + style из профиля (склеено)
-  params: ModelParams;  // дефолтные параметры модели из профиля
-  profile?: Profile;    // исходный профиль (на всякий)
+  profileName: string;
+  system: string;
+  params: ModelParams;
+  profile?: Profile;
 };
 
 function composeSystem(p?: Profile): string {
@@ -22,7 +22,7 @@ function composeSystem(p?: Profile): string {
   return parts.filter(Boolean).join("\n\n");
 }
 
-async function findProfile(name?: string): Promise<Profile | undefined> {
+async function lookupProfile(name?: string): Promise<Profile | undefined> {
   const list = await loadProfiles();
   const n = (name || "").toLowerCase().trim();
   let p = n ? list.find(x => x.name.toLowerCase() === n) : undefined;
@@ -30,10 +30,13 @@ async function findProfile(name?: string): Promise<Profile | undefined> {
   return p;
 }
 
-export async function getAppliedProfile(name?: string): Promise<AppliedProfile> {
-  const p = await findProfile(name);
+export async function getAppliedProfile(nameOrProfile?: string | Profile): Promise<AppliedProfile> {
+  const p = (typeof nameOrProfile === "object" && nameOrProfile?.name)
+    ? (nameOrProfile as Profile)
+    : await lookupProfile(nameOrProfile as string | undefined);
+
   return {
-    profileName: p?.name || (name || "qa"),
+    profileName: p?.name || (typeof nameOrProfile === "string" ? nameOrProfile : "qa"),
     system: composeSystem(p),
     params: {
       temperature: p?.params?.temperature,
@@ -62,3 +65,7 @@ export function mergeParams(base: ModelParams, overrides?: ModelParams): ModelPa
     max_tokens:  overrides?.max_tokens  ?? base.max_tokens,
   };
 }
+
+// Обратная совместимость: где-то ещё могут импортировать findProfile.
+// Важно: теперь это alias, который возвращает AppliedProfile, а не Profile!
+export { getAppliedProfile as findProfile };

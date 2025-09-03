@@ -1,5 +1,5 @@
 // apps/web/src/lib/memories.ts
-import { q, withPgRetry } from "./@/lib/db";
+import { q, withPgRetry } from "./db";
 import { embedMany } from "./embeddings";
 import { randomUUID } from "crypto";
 
@@ -47,3 +47,4 @@ export async function upsertMemoriesBatch(kind: string, items: UpsertItem[]): Pr
 
   return inserted;
 }
+
