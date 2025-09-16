@@ -1,83 +1,59 @@
-// apps/web/src/lib/embeddings.ts
 import OpenAI from "openai";
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/**
- * Модель эмбеддингов:
- * по умолчанию "text-embedding-3-small" (дешёво и достаточно для RAG).
- * Можно переопределить через .env.local: EMBED_MODEL=...
- */
-const EMBED_MODEL = (process.env.EMBED_MODEL ?? "text-embedding-3-small").trim();
+const MODEL = process.env.EMBED_MODEL || "text-embedding-3-small"; // 1536
+const DIMS  = Number(process.env.EMBED_DIMS || 1536);
 
-/** мягкий трим входа (на всякий случай) */
-function trimForEmbed(s: string, maxChars = 8000) {
-  const t = String(s ?? "");
-  return t.length > maxChars ? t.slice(0, maxChars) : t;
+// Грубая оценка токенов (≈4 символа на токен)
+function estimateTokens(s: string) {
+  return Math.ceil((s?.length || 0) / 4);
 }
 
-/** небольшой backoff для транзиентных сбоев сети */
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+// Жёсткие лимиты (чуть ниже серверных, с запасом)
+const MAX_TOKENS_PER_REQ = 280_000;   // суммарно на batch
+const MAX_ITEMS_PER_REQ  = 96;        // ограничим количество инпутов
+const MAX_ITEM_TOKENS    = 8_000;     // per-input лимит модели (safe)
 
-/** Создаём свежий клиент (как в emb-ping) — без лишних опций */
-function makeClient() {
-  return new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY!,
-    // оставим только timeout — это безопасно
-    timeout: Number(process.env.OPENAI_TIMEOUT_MS || 45000),
-  });
-}
+export async function embedMany(texts: string[]): Promise<number[][]> {
+  if (!texts?.length) return [];
 
-/** Эмбеддинг одной строки (ровно строка, не массив) с повторами */
-export async function getEmbedding(text: string, model = EMBED_MODEL): Promise<number[]> {
-  const input = trimForEmbed(text);
-  let last: any;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await makeClient().embeddings.create({ model, input });
-      return (res.data[0].embedding as unknown) as number[];
-    } catch (e: any) {
-      last = e;
-      const msg = String(e?.message ?? e);
-      if (/timeout|ETIMEDOUT|ENETUNREACH|ECONNRESET|EAI_AGAIN/i.test(msg) && attempt < 2) {
-        await sleep(350 * (attempt + 1));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw last;
-}
+  // Разбиваем вход на батчи по сумме токенов и количеству элементов
+  const batches: string[][] = [];
+  let cur: string[] = [];
+  let curTok = 0;
 
-/**
- * Эмбеддинг массива строк: по одной строке за вызов.
- * Это на доли секунды медленнее, но исключает странности сериализации input.
- */
-export async function embedMany(texts: string[], model = EMBED_MODEL): Promise<number[][]> {
-  const out: number[][] = [];
+  const pushBatch = () => {
+    if (cur.length) batches.push(cur), cur = [], curTok = 0;
+  };
+
   for (const t of texts) {
-    const s = trimForEmbed(t);
-    let last: any;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const res = await makeClient().embeddings.create({ model, input: s });
-        out.push((res.data[0].embedding as unknown) as number[]);
-        last = null;
-        break;
-      } catch (e: any) {
-        last = e;
-        const msg = String(e?.message ?? e);
-        if (/timeout|ETIMEDOUT|ENETUNREACH|ECONNRESET|EAI_AGAIN/i.test(msg) && attempt < 2) {
-          await sleep(350 * (attempt + 1));
-          continue;
-        }
-        throw e;
-      }
+    const tt = estimateTokens(t);
+    if (tt > MAX_ITEM_TOKENS) {
+      // отрежем очень длинные куски (защитный механизм)
+      const safe = t.slice(0, MAX_ITEM_TOKENS * 4);
+      cur.push(safe);
+      curTok += Math.min(tt, MAX_ITEM_TOKENS);
+    } else {
+      cur.push(t);
+      curTok += tt;
     }
-    if (last) throw last;
+    if (cur.length >= MAX_ITEMS_PER_REQ || curTok >= MAX_TOKENS_PER_REQ) pushBatch();
+  }
+  pushBatch();
+
+  const out: number[][] = [];
+  for (const b of batches) {
+    const res = await client.embeddings.create({ model: MODEL, input: b });
+    for (const row of res.data) {
+      const v = row.embedding as unknown as number[];
+      if (v.length !== DIMS) throw new Error(`Embedding dims mismatch: got ${v.length}, expected ${DIMS}`);
+      out.push(v);
+    }
   }
   return out;
 }
 
-/** Утилита для SQL-литерала */
-export function toVectorLiteral(vec: number[]): string {
-  return `[${vec.join(",")}]`;
+export async function embedQuery(text: string): Promise<number[]> {
+  const [v] = await embedMany([text]);
+  return v;
 }

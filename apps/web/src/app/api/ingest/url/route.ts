@@ -1,92 +1,96 @@
+// apps/web/src/app/api/ingest/url/route.ts
 import { NextResponse } from "next/server";
-import { JSDOM } from "jsdom";
-import { Readability } from "@mozilla/readability";
 import { embedMany } from "@/lib/embeddings";
 import { upsertMemoriesBatch } from "@/lib/memories";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type Body = {
   ns: string;
   url: string;
-  kind?: "web";
-  asMarkdown?: boolean; // парсить как «чистый текст» (Readability)
+  slot?: string | null;
+  kind?: string | null;
   chunk?: { chars?: number; overlap?: number };
-  minChars?: number; // минимальный допуск длины текста (по умолчанию 160)
 };
 
-function extractMainText(html: string, url: string) {
-  const dom = new JSDOM(html, { url });
-  const article = new Readability(dom.window.document).parse();
-  const raw = article?.textContent || dom.window.document.body.textContent || "";
-  return raw.replace(/\s+\n/g, "\n").replace(/\n{2,}/g, "\n\n").trim();
+function assertAdmin(req: Request) {
+  const need = (process.env.X_ADMIN_KEY || "").trim();
+  if (!need) return;
+  const got = (req.headers.get("x-admin-key") || "").trim();
+  if (need && got !== need) throw new Error("unauthorized");
+}
+
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+
+function stripTags(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export async function POST(req: Request) {
-  const stage = { value: "init" as
-    | "init"
-    | "fetch"
-    | "extract"
-    | "chunking"
-    | "embedding"
-    | "saving" };
-
+  const t0 = Date.now();
   try {
-    const body = (await req.json()) as Body;
-    const ns = body?.ns?.trim();
-    const url = body?.url?.trim();
-    const asMarkdown = body?.asMarkdown !== false; // по умолчанию включено
-
+    assertAdmin(req);
+    const { ns, url, slot = "staging", kind = "url", chunk } = (await req.json()) as Body;
     if (!ns || !url) {
       return NextResponse.json({ ok: false, error: "ns and url are required" }, { status: 400 });
     }
 
-    stage.value = "fetch";
-    const res = await fetch(url, { redirect: "follow" });
+    const res = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        "User-Agent": UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+      },
+    });
     if (!res.ok) {
-      return NextResponse.json({ ok: false, error: `fetch failed (${res.status})` }, { status: 502 });
+      const body = await res.text().catch(() => "");
+      throw new Error(`fetch failed: ${res.status} ${res.statusText} ${body.slice(0, 200)}`);
     }
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    const raw = await res.text();
+    const text = ct.includes("html") ? stripTags(raw) : raw;
+    if (!text?.trim()) throw new Error("empty text extracted");
 
-    stage.value = "extract";
-    const html = await res.text();
-    const rawText = asMarkdown ? extractMainText(html, url) : html;
+    const opts = normalizeChunkOpts(chunk);
+    const chunks = chunkText(text, opts);
+    const vectors = await embedMany(chunks);
 
-    const minChars = Number.isFinite(body?.minChars) ? Math.max(0, Number(body!.minChars)) : 160;
-    if ((rawText?.length ?? 0) < minChars) {
-      return NextResponse.json(
-        { ok: false, error: `content too short (${rawText?.length ?? 0})`, stage: "extract" },
-        { status: 400 }
-      );
-    }
-
-    stage.value = "chunking";
-    const chunks = chunkText(rawText, body?.chunk);
-    if (chunks.length === 0) {
-      return NextResponse.json({ ok: false, error: "empty after chunking", stage: "chunking" }, { status: 400 });
-    }
-
-    stage.value = "embedding";
-    const embeddings = await embedMany(chunks);
-
-    stage.value = "saving";
-    const rows = chunks.map((content, i) => ({
+    const records = chunks.map((content, i) => ({
+      kind: kind || "url",
       ns,
-      kind: "web" as const,
+      slot,
       content,
-      embedding: embeddings[i],
-      metadata: { url, extractor: asMarkdown ? "readability" : "raw-html", chunk: normalizeChunkOpts(body?.chunk) }
+      embedding: vectors[i],
+      metadata: {
+        source_type: "url",
+        url,
+        content_type: ct,
+        chunk_index: i,
+        chunk_chars: content.length,
+        chunk: opts,
+      },
     }));
-
-    await upsertMemoriesBatch(rows as any);
+    const written: number = await upsertMemoriesBatch(records);
 
     return NextResponse.json({
       ok: true,
-      inserted: rows.length,
-      preview: { len: rawText.length, first: chunks[0]?.slice(0, 140) ?? "" }
+      ns,
+      slot,
+      url,
+      chunks: chunks.length,
+      written,
+           ms: Date.now() - t0,
     });
-  } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, error: err?.message || String(err), stage: stage.value },
-      { status: 500 }
-    );
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
   }
 }
