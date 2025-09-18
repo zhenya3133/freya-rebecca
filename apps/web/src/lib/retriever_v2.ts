@@ -1,153 +1,190 @@
-import { q } from "@/lib/db";
-import OpenAI from "openai";
-import { RECENCY, timeDecay } from "@/lib/recency";
+// apps/web/src/lib/retriever_v2.ts
+import { pool } from "@/lib/db";
+import { embedMany } from "@/lib/embeddings";
 
-const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-export type RetrieveOpts = {
-  ns: string;
-  query: string;
-  fetchK?: number;
-  topK?: number;
-  minScore?: number;
-  slot?: "staging" | "prod";
-  lambda?: number;
-};
-
-export type RetrievedChunk = {
-  id: string;
-  content: string;
-  source: any | null;
-  created_at: string;
-  dense: number;
-  bm25: number;
-  age_days: number;
-  emb: number[];
-  final: number;
-};
-
-function nsRecency(ns: string) {
-  return RECENCY[ns] || { halfLifeDays: 180, ttlDays: 365, alpha: 0.75, beta: 0.15, gamma: 0.10 };
-}
-
-function parsePgVectorText(s: string): number[] {
-  const m = /^\s*\[([^\]]*)\]\s*$/.exec(String(s ?? ""));
-  if (!m) return [];
-  return m[1].split(",").map(x => Number(x.trim())).filter(v => Number.isFinite(v));
-}
-
-async function embedQuery(text: string): Promise<number[]> {
-  const r = await openai.embeddings.create({ model: EMBED_MODEL, input: [text] });
-  return r.data[0].embedding as unknown as number[];
-}
-
-/**
- * Кандидаты из БД с учётом pubdate и TTL.
- * age_days считается от:
- *   source.metadata.published_at -> source.published_at -> created_at
- * Документы старше ttlDays (если задан) отфильтровываются.
- */
-async function dbCandidates(
-  ns: string,
-  query: string,
-  qVec: number[],
-  slot: "staging" | "prod",
-  fetchK: number,
-  ttlDays?: number
-): Promise<RetrievedChunk[]> {
-  const qvecText = "[" + qVec.map(x => Number(x).toFixed(6)).join(",") + "]";
-
-  const rows = await q<any>(`
-    with base as (
-      select
-        id,
-        content,
-        source,
-        created_at,
-        coalesce(
-          nullif((source->'metadata'->>'published_at'), '')::timestamptz,
-          nullif((source->>'published_at'), '')::timestamptz,
-          created_at
-        ) as pub_ts,
-        (1 - (embedding <=> $2::vector)) as dense,
-        ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $1)) as bm25,
-        (embedding::text) as emb_text
-      from chunks
-      where ns = $3 and slot = $4
-    )
-    select
-      id, content, source, created_at, dense, bm25,
-      extract(epoch from (now() - pub_ts))/86400.0 as age_days,
-      emb_text
-    from base
-    where ($6::int is null) or (now() - pub_ts <= make_interval(days => $6::int))
-    order by (dense + bm25) desc
-    limit $5;
-  `, [query, qvecText, ns, slot, fetchK, (ttlDays ?? null)]);
-
-  return rows.map((r: any) => ({
-    id: r.id,
-    content: r.content,
-    source: r.source || null,
-    created_at: r.created_at,
-    dense: Number(r.dense) || 0,
-    bm25: Math.min(Number(r.bm25) || 0, 1),
-    age_days: Math.max(Number(r.age_days) || 0, 0),
-    emb: parsePgVectorText(r.emb_text),
-    final: 0
-  }));
-}
-
-function cos(a: number[], b: number[]): number {
-  let num = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length && i < b.length; i++) {
-    const x = a[i], y = b[i];
-    num += x * y; na += x * x; nb += y * y;
-  }
-  const den = Math.sqrt(na) * Math.sqrt(nb) || 1e-8;
-  return num / den;
-}
-
-function mmrSelect(qVec: number[], cand: RetrievedChunk[], topK: number, lambda = 0.7): RetrievedChunk[] {
-  const selected: RetrievedChunk[] = [];
-  const rest = cand.slice();
-  while (selected.length < topK && rest.length > 0) {
-    let bestIdx = 0, bestScore = -Infinity;
-    for (let i = 0; i < rest.length; i++) {
-      const c = rest[i];
-      const rel = cos(qVec, c.emb);
-      let div = 0;
-      for (const s of selected) div = Math.max(div, cos(c.emb, s.emb));
-      const mmr = lambda * rel - (1 - lambda) * div;
-      if (mmr > bestScore) { bestScore = mmr; bestIdx = i; }
+/** Безопасный embedQuery: несколько попыток импорта, иначе fallback на embedMany */
+async function embedQuerySafe(q: string): Promise<number[]> {
+  try {
+    const modRel = await import("./embeddings");
+    if (typeof (modRel as any).embedQuery === "function") {
+      return await (modRel as any).embedQuery(q);
     }
-    selected.push(rest.splice(bestIdx, 1)[0]);
-  }
-  return selected;
+  } catch {}
+  try {
+    const modAlias = await import("@/lib/embeddings");
+    if (typeof (modAlias as any).embedQuery === "function") {
+      return await (modAlias as any).embedQuery(q);
+    }
+  } catch {}
+  const [v] = await embedMany([q]);
+  return v;
 }
 
-export async function retrieveV2(opts: RetrieveOpts): Promise<RetrievedChunk[]> {
-  const { ns, query, fetchK = 24, topK = 8, minScore = 0.52, slot = "staging", lambda = 0.7 } = opts;
+export type RecencyOptions = {
+  enabled?: boolean;
+  halfLifeDays?: number;
+  weight?: number;
+  usePublishedAt?: boolean;
+};
 
-  const qVec = await embedQuery(query);
-  const rc = nsRecency(ns);
+export type RetrieveParams = {
+  ns: string;
+  slot?: string | null;
+  query: string;
+  topK?: number;
+  candidateK?: number;
+  nsMode?: "strict" | "prefix";
+  includeKinds?: string[] | null;
+  includeSourceTypes?: string[] | null;
+  minSimilarity?: number;
+  recency?: RecencyOptions;
+};
 
-  // Вытаскиваем кандидатов с учетом TTL
-  let cand = await dbCandidates(ns, query, qVec, slot, fetchK, rc.ttlDays);
+export type RetrievedMatch = {
+  id: string;
+  kind: string | null;
+  ns: string;
+  slot: string | null;
+  content: string;
+  metadata: any;
+  created_at: string;
+  sim: number;
+  rec: number;
+  score: number;
+  sample: string;
+};
 
-  // Финальный скоринг: dense + bm25 + recency(timeDecay)
-  cand = cand.map(c => {
-    const t = timeDecay(c.age_days, rc.halfLifeDays);
-    const final = rc.alpha * c.dense + rc.gamma * c.bm25 + rc.beta * t;
-    return { ...c, final };
-  });
+export type RetrieveResult = {
+  ok: true;
+  took_ms: number;
+  params: Omit<RetrieveParams, "query"> & { query: string };
+  recencyEffective: { enabled: boolean; halfLifeDays: number; weight: number; usedPublishedAt: boolean };
+  candidates: number;
+  returned: number;
+  matches: RetrievedMatch[];
+};
 
-  // Отсечка по порогу и сортировка
-  cand = cand.filter(c => c.final >= minScore).sort((a, b) => b.final - a.final);
+function clamp(n: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, n));
+}
 
-  // MMR-диверсификация
-  const picked = mmrSelect(qVec, cand, Math.min(topK, cand.length), lambda);
-  picked.sort((a, b) => b.final - a.final);
-  return picked;
+function buildFilterSql(nsMode: "strict" | "prefix", hasKinds: boolean, hasSrcTypes: boolean) {
+  const nsClause =
+    nsMode === "prefix"
+      ? "ns LIKE ($2 || '%') AND ($3::text IS NULL OR slot = $3)"
+      : "ns = $2 AND ($3::text IS NULL OR slot = $3)";
+  const parts: string[] = [`(${nsClause})`];
+  if (hasKinds) parts.push("(kind = ANY($5::text[]))");
+  if (hasSrcTypes) parts.push("(metadata->>'source_type' = ANY($6::text[]))");
+  return parts.join(" AND ");
+}
+
+export async function retrieveV2(params: RetrieveParams): Promise<RetrieveResult> {
+  const t0 = Date.now();
+  const {
+    ns, slot = "staging", query,
+    topK = 5, candidateK = 200,
+    nsMode = "strict",
+    includeKinds, includeSourceTypes,
+    minSimilarity,
+    recency,
+  } = params;
+
+  if (!ns) throw new Error("ns is required");
+  if (!query?.trim()) throw new Error("query is empty");
+
+  // 1) эмбеддинг запроса
+  const qvec = await embedQuerySafe(query);
+  // ВАЖНО: pgvector ждёт строковый литерал в формате [a,b,c]
+  const qvecLit = "[" + qvec.join(",") + "]";
+
+  // 2) кандидаты из ANN
+  const K = clamp(topK, 1, 50);
+  const CAND = clamp(candidateK, K, 1000);
+  const hasKinds = Array.isArray(includeKinds) && includeKinds.length > 0;
+  const hasSrcTypes = Array.isArray(includeSourceTypes) && includeSourceTypes.length > 0;
+
+  const where = buildFilterSql(nsMode, hasKinds, hasSrcTypes);
+  const sql = `
+    SELECT id, kind, ns, slot, content, metadata, created_at,
+           (embedding <=> $1::vector) AS dist
+    FROM memories
+    WHERE ${where}
+    ORDER BY embedding <=> $1::vector
+    LIMIT $4
+  `;
+  const args: any[] = [qvecLit, ns, slot, CAND];
+  if (hasKinds) args.push(includeKinds);
+  if (hasSrcTypes) { if (!hasKinds) args.push([]); args.push(includeSourceTypes); }
+
+  const { rows } = await pool.query(sql, args);
+
+  // 3) доранжировка: similarity + recency
+  const alpha = 1 - (recency?.weight ?? 0.2);
+  const beta  = (recency?.weight ?? 0.2);
+  const half  = clamp(Math.floor(recency?.halfLifeDays ?? Number(process.env.RECENCY_HALFLIFE_DAYS || 30)), 1, 3650);
+  const usePub = !!recency?.usePublishedAt;
+  const recOn = recency?.enabled !== false;
+
+  const LN2 = Math.log(2);
+  const now = Date.now();
+
+  function recencyBoost(r: any) {
+    let t = r.created_at ? new Date(r.created_at).getTime() : 0;
+    if (usePub) {
+      const p = r?.metadata?.published_at ?? r?.metadata?.["published_at"];
+      if (typeof p === "string") {
+        const tp = Date.parse(p);
+        if (!Number.isNaN(tp)) t = tp;
+      }
+    }
+    if (!t) return 0;
+    const ageDays = (now - t) / (1000 * 60 * 60 * 24);
+    return Math.exp(-LN2 * (ageDays / half));
+  }
+
+  const rescored = rows
+    .map((r) => {
+      const sim = 1 - Number(r.dist);
+      const rec = recOn ? recencyBoost(r) : 0;
+      const score = alpha * sim + beta * rec;
+      return { ...r, sim, rec, score };
+    })
+    .filter((r) => (typeof minSimilarity === "number" ? r.sim >= minSimilarity : true))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, K);
+
+  const matches: RetrievedMatch[] = rescored.map((r) => ({
+    id: r.id,
+    kind: r.kind ?? null,
+    ns: r.ns,
+    slot: r.slot ?? null,
+    content: r.content,
+    metadata: r.metadata,
+    created_at: r.created_at,
+    sim: Number((r as any).sim.toFixed(4)),
+    rec: Number((r as any).rec.toFixed(4)),
+    score: Number((r as any).score.toFixed(4)),
+    sample: (r.content as string)?.slice(0, 240) || "",
+  }));
+
+  return {
+    ok: true,
+    took_ms: Date.now() - t0,
+    params: {
+      ns, slot, query,
+      topK: K, candidateK: CAND,
+      nsMode,
+      includeKinds: includeKinds ?? null,
+      includeSourceTypes: includeSourceTypes ?? null,
+      minSimilarity: typeof minSimilarity === "number" ? minSimilarity : undefined,
+      recency,
+    },
+    recencyEffective: {
+      enabled: recOn, halfLifeDays: half, weight: beta, usedPublishedAt: usePub,
+    },
+    candidates: rows.length,
+    returned: matches.length,
+    matches,
+  };
 }
