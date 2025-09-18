@@ -14,9 +14,18 @@ type Body = {
   owner: string;
   repo: string;
   ref?: string | null;          // branch or sha
-  path?: string | null;         // optional subdir filter
+  path?: string | null;         // subdir filter (prefix)
   includeExt?: string[] | null; // e.g. [".md",".mdx",".py",".ipynb",".txt"]
   excludeExt?: string[] | null;
+
+  // НОВОЕ: пагинация
+  cursor?: number | null;       // смещение в отсортированном списке файлов (0..)
+  limit?: number | null;        // сколько файлов взять сейчас (дефолт 250)
+
+  // НОВОЕ: "сухой прогон" — только посчитать/список, без скачивания/эмбеддингов
+  dryRun?: boolean | null;
+
+  // стандартные опции чанкинга
   chunk?: { chars?: number; overlap?: number };
 };
 
@@ -31,10 +40,10 @@ const GH = "https://api.github.com";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-// мягкие лимиты, чтобы не взрывать embedding API
-const MAX_FILES = 400;            // максимум файлов за один запрос
-const MAX_FILE_BYTES = 1_000_000; // пропустить файлы > 1 МБ
-const MAX_TOTAL_CHUNKS = 6000;    // общий лимит чанков на один вызов
+// мягкие лимиты на один ВЫЗОВ (страницу)
+const MAX_LIMIT_FILES     = 250;     // максимум файлов за один вызов (страницу)
+const MAX_FILE_BYTES      = 1_000_000; // пропускаем файлы >1 МБ
+const MAX_TOTAL_CHUNKS    = 3000;    // общий лимит чанков на один вызов
 
 async function gh<T = any>(url: string) {
   const headers: Record<string, string> = {
@@ -59,16 +68,15 @@ function extOf(name: string) {
 function ipynbToText(nb: any): string {
   try {
     const cells = Array.isArray(nb?.cells) ? nb.cells : [];
-    return cells
-      .map((c: any) => (Array.isArray(c?.source) ? c.source.join("") : ""))
-      .join("\n\n");
+    return cells.map((c: any) => (Array.isArray(c?.source) ? c.source.join("") : "")).join("\n\n");
   } catch {
     return "";
   }
 }
 
 export async function POST(req: Request) {
-  const t0 = Date.now();
+  const started = Date.now();
+  let stage = "init";
   try {
     assertAdmin(req);
     const {
@@ -81,74 +89,108 @@ export async function POST(req: Request) {
       path = "",
       includeExt,
       excludeExt,
+
+      cursor = 0,
+      limit = MAX_LIMIT_FILES,
+      dryRun = false,
+
       chunk,
     } = (await req.json()) as Body;
 
     if (!ns || !owner || !repo) {
       return NextResponse.json({ ok: false, error: "ns, owner, repo required" }, { status: 400 });
     }
+    const lim = Math.max(1, Math.min(Number(limit) || MAX_LIMIT_FILES, MAX_LIMIT_FILES));
+    const cur = Math.max(0, Number(cursor) || 0);
 
-    // 1) определяем SHA
+    // 1) определяем commit SHA
+    stage = "ref";
     let sha = "";
     try {
-      const head = await gh<{ object: { sha: string } }>(
-        `${GH}/repos/${owner}/${repo}/git/refs/heads/${ref}`
-      );
+      const head = await gh<{ object: { sha: string } }>(`${GH}/repos/${owner}/${repo}/git/refs/heads/${ref}`);
       sha = head.object.sha;
     } catch {
-      const anyRef = await gh<{ object: { sha: string } }>(
-        `${GH}/repos/${owner}/${repo}/git/refs/${ref}`
-      );
+      const anyRef = await gh<{ object: { sha: string } }>(`${GH}/repos/${owner}/${repo}/git/refs/${ref}`);
       sha = anyRef.object.sha;
     }
 
-    // 2) дерево файлов
+    // 2) получаем дерево файлов, фильтруем и сортируем
+    stage = "tree";
     const tree = await gh<{ tree: { path: string; type: string; sha: string }[] }>(
       `${GH}/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`
     );
 
-    const files = tree.tree.filter(
-      (t) => t.type === "blob" && (!path || t.path.startsWith(path))
-    );
-
-    const allow = (name: string) => {
+    const allowByExt = (name: string) => {
       const e = extOf(name);
       if (includeExt && includeExt.length && !includeExt.includes(e)) return false;
       if (excludeExt && excludeExt.includes(e)) return false;
-      // быстрый отсев известных бинарников
-      if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".tar", ".gz"].includes(e))
-        return false;
+      // базовый отсев бинарников/медиа
+      if ([".png",".jpg",".jpeg",".gif",".webp",".svg",".pdf",".zip",".tar",".gz",".7z",".mp4",".mp3"].includes(e)) return false;
       return true;
     };
 
-    const selected = files.filter((f) => allow(f.path)).slice(0, MAX_FILES);
+    const allFiles = tree.tree
+      .filter((t) => t.type === "blob" && (!path || t.path.startsWith(path)))
+      .map((t) => t.path)
+      .filter(allowByExt)
+      .sort((a, b) => a.localeCompare(b));
 
-    // 3) тянем содержимое и чанк-ним
+    const totalFiles = allFiles.length;
+    const pageFiles = allFiles.slice(cur, cur + lim);
+    const nextCursor = cur + pageFiles.length < totalFiles ? cur + pageFiles.length : null;
+
+    if (dryRun) {
+      // Ничего не скачиваем/не пишем — только план
+      return NextResponse.json({
+        ok: true,
+        ns, slot, owner, repo, ref,
+        totalFiles,
+        windowStart: cur,
+        windowEnd: cur + pageFiles.length - 1,
+        pageFiles: pageFiles.length,
+        nextCursor,
+        ms: Date.now() - started,
+        preview: pageFiles.slice(0, 10), // маленький список для наглядности
+      });
+    }
+
+    if (!pageFiles.length) {
+      return NextResponse.json({
+        ok: true,
+        ns, slot, owner, repo, ref,
+        totalFiles,
+        windowStart: cur,
+        windowEnd: cur - 1,
+        pageFiles: 0,
+        chunks: 0,
+        written: 0,
+        nextCursor,
+        ms: Date.now() - started,
+      });
+    }
+
+    // 3) скачиваем контент выбранных файлов и чанк-ним (с ограничениями)
+    stage = "fetch+chunk";
     const chunksAll: string[] = [];
     const metas: any[] = [];
+    const opts = normalizeChunkOpts(chunk);
 
-    for (const f of selected) {
-      // метаданные и размер файла
+    for (const p of pageFiles) {
+      // метаданные и размер
       const meta = await gh<{ size?: number; path: string }>(
-        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(f.path)}?ref=${ref}`
+        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${ref}`
       );
-
       if ((meta as any)?.size && (meta as any).size > MAX_FILE_BYTES) continue;
 
-      // уже с контентом (тот же URL, GitHub вернёт base64)
       const raw = await gh<{ content: string; encoding: string; path: string; size?: number }>(
-        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(f.path)}?ref=${ref}`
+        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${ref}`
       );
 
       let text = "";
       if (raw.encoding === "base64") {
         const buf = Buffer.from(raw.content, "base64").toString("utf8");
         if (extOf(raw.path) === ".ipynb") {
-          try {
-            text = ipynbToText(JSON.parse(buf));
-          } catch {
-            text = "";
-          }
+          try { text = ipynbToText(JSON.parse(buf)); } catch { text = ""; }
         } else {
           text = buf;
         }
@@ -156,19 +198,14 @@ export async function POST(req: Request) {
       text = (text || "").trim();
       if (!text) continue;
 
-      const opts = normalizeChunkOpts(chunk);
       const parts = chunkText(text, opts);
-
-      for (const p of parts) {
-        chunksAll.push(p);
+      for (const part of parts) {
+        chunksAll.push(part);
         metas.push({
           source_type: "github",
-          owner,
-          repo,
-          ref,
-          path: raw.path,
-          chunk_chars: p.length,
+          owner, repo, ref, path: raw.path,
           chunk: opts,
+          chunk_chars: part.length,
         });
         if (chunksAll.length >= MAX_TOTAL_CHUNKS) break;
       }
@@ -176,36 +213,49 @@ export async function POST(req: Request) {
     }
 
     if (!chunksAll.length) {
-      return NextResponse.json(
-        { ok: true, ns, slot, owner, repo, ref, files: selected.length, chunks: 0, written: 0, ms: Date.now() - t0 },
-        { status: 200 }
-      );
+      return NextResponse.json({
+        ok: true,
+        ns, slot, owner, repo, ref,
+        totalFiles,
+        windowStart: cur,
+        windowEnd: cur + pageFiles.length - 1,
+        pageFiles: pageFiles.length,
+        chunks: 0,
+        written: 0,
+        nextCursor,
+        ms: Date.now() - started,
+      });
     }
 
+    // 4) эмбеддинги и запись
+    stage = "embed";
     const vectors = await embedMany(chunksAll);
+
+    stage = "db";
     const records = chunksAll.map((content, i) => ({
       kind: kind || "github",
-      ns,
-      slot,
+      ns, slot,
       content,
       embedding: vectors[i],
       metadata: metas[i],
     }));
+
+    // Важно: у тебя upsertMemoriesBatch возвращает number (сколько записей сделано)
     const written: number = await upsertMemoriesBatch(records);
 
     return NextResponse.json({
       ok: true,
-      ns,
-      slot,
-      owner,
-      repo,
-      ref,
-      files: selected.length,
+      ns, slot, owner, repo, ref,
+      totalFiles,
+      windowStart: cur,
+      windowEnd: cur + pageFiles.length - 1,
+      pageFiles: pageFiles.length,
       chunks: chunksAll.length,
       written,
-            ms: Date.now() - t0,
+      nextCursor,
+      ms: Date.now() - started,
     });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+    return NextResponse.json({ ok: false, stage, error: e?.message || String(e) }, { status: 500 });
   }
 }
