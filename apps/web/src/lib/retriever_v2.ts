@@ -1,190 +1,268 @@
 // apps/web/src/lib/retriever_v2.ts
-import { pool } from "@/lib/db";
-import { embedMany } from "@/lib/embeddings";
+import { embedQuery } from "@/lib/embeddings";
+import { pool } from "@/lib/pg";
 
-/** Безопасный embedQuery: несколько попыток импорта, иначе fallback на embedMany */
-async function embedQuerySafe(q: string): Promise<number[]> {
-  try {
-    const modRel = await import("./embeddings");
-    if (typeof (modRel as any).embedQuery === "function") {
-      return await (modRel as any).embedQuery(q);
-    }
-  } catch {}
-  try {
-    const modAlias = await import("@/lib/embeddings");
-    if (typeof (modAlias as any).embedQuery === "function") {
-      return await (modAlias as any).embedQuery(q);
-    }
-  } catch {}
-  const [v] = await embedMany([q]);
-  return v;
-}
-
+/** Настройки «свежести» результата. */
 export type RecencyOptions = {
-  enabled?: boolean;
-  halfLifeDays?: number;
-  weight?: number;
-  usePublishedAt?: boolean;
+  enabled: boolean;
+  halfLifeDays: number;    // период полураспада (дни)
+  weight: number;          // вес свежести в итоговом score [0..1]
+  usePublishedAt: boolean; // брать published_at из metadata, иначе created_at
 };
 
-export type RetrieveParams = {
+/** Фильтр доменов по URL в metadata->>'url'. */
+export type DomainFilter = {
+  allow?: string[];
+  deny?: string[];
+};
+
+type RetrieveParams = {
   ns: string;
-  slot?: string | null;
+  slot: string;
   query: string;
-  topK?: number;
-  candidateK?: number;
+
+  topK: number;
+  candidateK: number;
+
   nsMode?: "strict" | "prefix";
   includeKinds?: string[] | null;
   includeSourceTypes?: string[] | null;
-  minSimilarity?: number;
-  recency?: RecencyOptions;
+
+  minSimilarity?: number;            // [0..1]
+  recency?: RecencyOptions | null;
+  domainFilter?: DomainFilter | null;
 };
 
-export type RetrievedMatch = {
+type Row = {
   id: string;
-  kind: string | null;
+  kind: string;
   ns: string;
-  slot: string | null;
+  slot: string;
   content: string;
   metadata: any;
-  created_at: string;
-  sim: number;
-  rec: number;
-  score: number;
-  sample: string;
+  created_at: string | null;
+  dist: number;     // расстояние
+  sim_raw: number;  // 1/(1+dist)
 };
 
-export type RetrieveResult = {
-  ok: true;
-  took_ms: number;
-  params: Omit<RetrieveParams, "query"> & { query: string };
-  recencyEffective: { enabled: boolean; halfLifeDays: number; weight: number; usedPublishedAt: boolean };
-  candidates: number;
-  returned: number;
-  matches: RetrievedMatch[];
-};
-
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
+function clamp01(x: number) {
+  return Math.max(0, Math.min(1, x));
 }
 
-function buildFilterSql(nsMode: "strict" | "prefix", hasKinds: boolean, hasSrcTypes: boolean) {
-  const nsClause =
-    nsMode === "prefix"
-      ? "ns LIKE ($2 || '%') AND ($3::text IS NULL OR slot = $3)"
-      : "ns = $2 AND ($3::text IS NULL OR slot = $3)";
-  const parts: string[] = [`(${nsClause})`];
-  if (hasKinds) parts.push("(kind = ANY($5::text[]))");
-  if (hasSrcTypes) parts.push("(metadata->>'source_type' = ANY($6::text[]))");
-  return parts.join(" AND ");
+function nowUtc(): number {
+  return Date.now();
 }
 
-export async function retrieveV2(params: RetrieveParams): Promise<RetrieveResult> {
-  const t0 = Date.now();
-  const {
-    ns, slot = "staging", query,
-    topK = 5, candidateK = 200,
-    nsMode = "strict",
-    includeKinds, includeSourceTypes,
-    minSimilarity,
-    recency,
-  } = params;
+function daysBetween(fromIso: string | null | undefined): number {
+  if (!fromIso) return 99999;
+  const t = Date.parse(fromIso);
+  if (!Number.isFinite(t)) return 99999;
+  return (nowUtc() - t) / (1000 * 60 * 60 * 24);
+}
 
-  if (!ns) throw new Error("ns is required");
-  if (!query?.trim()) throw new Error("query is empty");
+/** Простая нормализация L2-distance к похожести [0..1]. */
+function simFromL2(dist: number): number {
+  return 1 / (1 + Math.max(0, dist));
+}
 
-  // 1) эмбеддинг запроса
-  const qvec = await embedQuerySafe(query);
-  // ВАЖНО: pgvector ждёт строковый литерал в формате [a,b,c]
-  const qvecLit = "[" + qvec.join(",") + "]";
+/** Экспоненциальный «полураспад» свежести. */
+function recencyBoost(days: number, halfLifeDays: number): number {
+  if (halfLifeDays <= 0) return 1;
+  return Math.exp(-Math.log(2) * (days / halfLifeDays));
+}
 
-  // 2) кандидаты из ANN
-  const K = clamp(topK, 1, 50);
-  const CAND = clamp(candidateK, K, 1000);
-  const hasKinds = Array.isArray(includeKinds) && includeKinds.length > 0;
-  const hasSrcTypes = Array.isArray(includeSourceTypes) && includeSourceTypes.length > 0;
+/** Безопасно парсим hostname. */
+function hostFromUrl(u?: string | null): string | null {
+  if (!u) return null;
+  try {
+    const raw = new URL(u).hostname.toLowerCase();
+    const h = raw.startsWith("www.") ? raw.slice(4) : raw;
+    return h || null;
+  } catch {
+    return null;
+  }
+}
 
-  const where = buildFilterSql(nsMode, hasKinds, hasSrcTypes);
-  const sql = `
-    SELECT id, kind, ns, slot, content, metadata, created_at,
-           (embedding <=> $1::vector) AS dist
-    FROM memories
-    WHERE ${where}
-    ORDER BY embedding <=> $1::vector
-    LIMIT $4
-  `;
-  const args: any[] = [qvecLit, ns, slot, CAND];
-  if (hasKinds) args.push(includeKinds);
-  if (hasSrcTypes) { if (!hasKinds) args.push([]); args.push(includeSourceTypes); }
+/** Сопоставление домена с учётом поддоменов. */
+function hostMatchesRule(host: string, rule: string): boolean {
+  const r = rule.toLowerCase().replace(/^www\./, "");
+  if (host === r) return true;
+  return host.endsWith("." + r);
+}
 
-  const { rows } = await pool.query(sql, args);
+/** Собираем литерал вектора для pgvector: '[1,2,3]' */
+function vectorLiteral(vec: number[]): string {
+  const nums = vec.map((v) => (Number.isFinite(v) ? Number(v) : 0)).join(",");
+  return `[${nums}]`;
+}
 
-  // 3) доранжировка: similarity + recency
-  const alpha = 1 - (recency?.weight ?? 0.2);
-  const beta  = (recency?.weight ?? 0.2);
-  const half  = clamp(Math.floor(recency?.halfLifeDays ?? Number(process.env.RECENCY_HALFLIFE_DAYS || 30)), 1, 3650);
-  const usePub = !!recency?.usePublishedAt;
-  const recOn = recency?.enabled !== false;
+export async function retrieveV2(p: RetrieveParams) {
+  const started = Date.now();
 
-  const LN2 = Math.log(2);
-  const now = Date.now();
+  const nsMode = p.nsMode ?? "strict";
+  const includeKinds = p.includeKinds ?? null;
+  const includeSourceTypes = p.includeSourceTypes ?? null;
 
-  function recencyBoost(r: any) {
-    let t = r.created_at ? new Date(r.created_at).getTime() : 0;
-    if (usePub) {
-      const p = r?.metadata?.published_at ?? r?.metadata?.["published_at"];
-      if (typeof p === "string") {
-        const tp = Date.parse(p);
-        if (!Number.isNaN(tp)) t = tp;
-      }
-    }
-    if (!t) return 0;
-    const ageDays = (now - t) / (1000 * 60 * 60 * 24);
-    return Math.exp(-LN2 * (ageDays / half));
+  const recency: RecencyOptions = {
+    enabled: p.recency?.enabled ?? true,
+    halfLifeDays: p.recency?.halfLifeDays ?? 30,
+    weight: p.recency?.weight ?? 0.2,
+    usePublishedAt: p.recency?.usePublishedAt ?? false,
+  };
+
+  const topK = Math.max(1, Math.min(p.topK ?? 5, 1000));
+  const candidateK = Math.max(topK, Math.min(p.candidateK ?? 200, 10000));
+  const minSim = typeof p.minSimilarity === "number" ? clamp01(p.minSimilarity) : undefined;
+
+  // 1) Эмбеддинг запроса
+  const qEmb = await embedQuery(p.query);
+  if (!Array.isArray(qEmb) || qEmb.length < 8) {
+    throw new Error("embedQuery returned invalid vector");
+  }
+  const qvLiteral = vectorLiteral(qEmb); // "[…]"
+
+  // 2) WHERE-условия
+  const clauses: string[] = [];
+  const params: any[] = [];
+
+  if (nsMode === "prefix") {
+    params.push(p.ns, `${p.ns}/%`);
+    clauses.push(`(m.ns = $${params.length - 1} OR m.ns LIKE $${params.length})`);
+  } else {
+    params.push(p.ns);
+    clauses.push(`m.ns = $${params.length}`);
   }
 
-  const rescored = rows
-    .map((r) => {
-      const sim = 1 - Number(r.dist);
-      const rec = recOn ? recencyBoost(r) : 0;
-      const score = alpha * sim + beta * rec;
-      return { ...r, sim, rec, score };
-    })
-    .filter((r) => (typeof minSimilarity === "number" ? r.sim >= minSimilarity : true))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, K);
+  params.push(p.slot);
+  clauses.push(`m.slot = $${params.length}`);
 
-  const matches: RetrievedMatch[] = rescored.map((r) => ({
+  clauses.push(`m.embedding IS NOT NULL`);
+
+  if (includeKinds && includeKinds.length) {
+    params.push(includeKinds);
+    clauses.push(`m.kind = ANY($${params.length})`);
+  }
+  if (includeSourceTypes && includeSourceTypes.length) {
+    params.push(includeSourceTypes);
+    clauses.push(`(m.metadata->>'source_type') = ANY($${params.length})`);
+  }
+
+  // 3) SQL кандидатов (вектор как $X::vector)
+  params.push(qvLiteral);
+  const idxVec = params.length;
+
+  params.push(candidateK);
+  const idxLimit = params.length;
+
+  const text = `
+    WITH params AS (
+      SELECT $${idxVec}::vector AS qv
+    )
+    SELECT
+      m.id, m.kind, m.ns, m.slot, m.content, m.metadata, m.created_at,
+      (m.embedding <-> (SELECT qv FROM params)) AS dist,
+      (1.0 / (1.0 + (m.embedding <-> (SELECT qv FROM params)))) AS sim_raw
+    FROM memories m
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY m.embedding <-> (SELECT qv FROM params)
+    LIMIT $${idxLimit}
+  `;
+
+  let rows: Row[] = [];
+  try {
+    const r = await pool.query(text, params);
+    rows = r.rows as Row[];
+  } catch (e: any) {
+    throw new Error(`SQL retrieve failed: ${e?.message || String(e)}`);
+  }
+
+  const candidates = rows.length;
+
+  // 4) Доменный фильтр + скоринг со свежестью
+  const allow = (p.domainFilter?.allow ?? []).map((s) => s.toLowerCase().replace(/^www\./, ""));
+  const deny  = (p.domainFilter?.deny  ?? []).map((s) => s.toLowerCase().replace(/^www\./, ""));
+  const useDomainFilter = allow.length > 0 || deny.length > 0;
+
+  const filtered = rows.filter((r) => {
+    if (!useDomainFilter) return true;
+    const h = hostFromUrl(r?.metadata?.url);
+    if (!h) return false;
+
+    if (deny.length && deny.some((d) => hostMatchesRule(h, d))) return false;
+    if (allow.length && !allow.some((a) => hostMatchesRule(h, a))) return false;
+
+    return true;
+  });
+
+  const afterDomain = filtered.length;
+
+  const scored = filtered
+    .map((r) => {
+      const sim = clamp01(simFromL2(r.dist));
+      const ageIso =
+        (recency.usePublishedAt ? r?.metadata?.published_at : null) ||
+        r.created_at ||
+        null;
+      const ageDays = daysBetween(ageIso);
+      const recent = recency.enabled ? recencyBoost(ageDays, recency.halfLifeDays) : 1;
+
+      const alpha = clamp01(recency.weight);
+      const score = (1 - alpha) * sim + alpha * recent;
+
+      return { r, sim, recent, score };
+    })
+    .filter((x) => (minSim !== undefined ? x.sim >= minSim : true))
+    .sort((a, b) => b.score - a.score);
+
+  // ВАЖНО: ограничиваем именно здесь, после сортировки
+  const matchesRaw = scored.slice(0, topK);
+
+  const matches = matchesRaw.map(({ r, sim, recent, score }) => ({
     id: r.id,
-    kind: r.kind ?? null,
+    kind: r.kind,
     ns: r.ns,
-    slot: r.slot ?? null,
+    slot: r.slot,
     content: r.content,
     metadata: r.metadata,
     created_at: r.created_at,
-    sim: Number((r as any).sim.toFixed(4)),
-    rec: Number((r as any).rec.toFixed(4)),
-    score: Number((r as any).score.toFixed(4)),
-    sample: (r.content as string)?.slice(0, 240) || "",
+    sim,
+    rec: recent,
+    score,
+    sample: r.content?.slice(0, 240) ?? "",
   }));
+
+  const filterInfo =
+    useDomainFilter
+      ? {
+          allow: allow.length ? allow : undefined,
+          deny: deny.length ? deny : undefined,
+          candidatesBefore: candidates,
+          candidatesAfter: afterDomain,
+          dropped: Math.max(0, candidates - afterDomain),
+        }
+      : null;
 
   return {
     ok: true,
-    took_ms: Date.now() - t0,
+    took_ms: Date.now() - started,
     params: {
-      ns, slot, query,
-      topK: K, candidateK: CAND,
+      ns: p.ns,
+      slot: p.slot,
+      query: p.query,
+      topK,
+      candidateK,
       nsMode,
-      includeKinds: includeKinds ?? null,
-      includeSourceTypes: includeSourceTypes ?? null,
-      minSimilarity: typeof minSimilarity === "number" ? minSimilarity : undefined,
+      includeKinds,
+      includeSourceTypes,
+      minSimilarity: minSim,
       recency,
+      domainFilter: p.domainFilter ?? null,
     },
-    recencyEffective: {
-      enabled: recOn, halfLifeDays: half, weight: beta, usedPublishedAt: usePub,
-    },
-    candidates: rows.length,
-    returned: matches.length,
+    recencyEffective: { ...recency },
+    candidates,                // сколько кандидатов до пост-фильтров
+    returned: matches.length,  // сколько реально вернули (≤ topK)
+    filterInfo,                // null если фильтр не применялся
     matches,
+    debugVersion: "r2-domains-slice-v2",
   };
 }
