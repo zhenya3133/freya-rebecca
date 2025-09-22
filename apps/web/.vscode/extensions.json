@@ -1,0 +1,19 @@
+{
+  "recommendations": [
+    "ms-vscode-remote.remote-wsl",
+    "ms-vscode-remote.remote-containers",
+    "ms-azuretools.vscode-docker",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "EditorConfig.EditorConfig",
+    "bradlc.vscode-tailwindcss",
+    "mikestead.dotenv",
+    "eamodio.gitlens",
+    "usernamehw.errorlens",
+    "oderwat.indent-rainbow",
+    "streetsidesoftware.code-spell-checker",
+    "cweijan.vscode-postgresql",
+    "humao.rest-client",
+    "yzhang.markdown-all-in-one"
+  ]
+}
