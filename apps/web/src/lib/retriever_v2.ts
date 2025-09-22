@@ -1,268 +1,259 @@
 // apps/web/src/lib/retriever_v2.ts
-import { embedQuery } from "@/lib/embeddings";
 import { pool } from "@/lib/pg";
+import { embedQuery } from "@/lib/embeddings";
+import {
+  RetrieveRequest,
+  RetrieveResponse,
+  RetrieveItem,
+  clamp,
+  matchesDomain,
+} from "@/lib/retrieval-contract";
 
-/** Настройки «свежести» результата. */
-export type RecencyOptions = {
-  enabled: boolean;
-  halfLifeDays: number;    // период полураспада (дни)
-  weight: number;          // вес свежести в итоговом score [0..1]
-  usePublishedAt: boolean; // брать published_at из metadata, иначе created_at
-};
+const ALPHA = Number(process.env.RETRIEVE_ALPHA ?? 0.85);
+const BETA = Number(process.env.RETRIEVE_BETA ?? 0.15);
+const HALF_LIFE_DAYS = Number(process.env.RETRIEVE_T_HALF ?? 180);
 
-/** Фильтр доменов по URL в metadata->>'url'. */
-export type DomainFilter = {
-  allow?: string[];
-  deny?: string[];
-};
-
-type RetrieveParams = {
-  ns: string;
-  slot: string;
-  query: string;
-
-  topK: number;
-  candidateK: number;
-
-  nsMode?: "strict" | "prefix";
-  includeKinds?: string[] | null;
-  includeSourceTypes?: string[] | null;
-
-  minSimilarity?: number;            // [0..1]
-  recency?: RecencyOptions | null;
-  domainFilter?: DomainFilter | null;
-};
+function timeDecay(publishedAt: string | null): number {
+  if (!publishedAt) return 0.5;
+  const t = Date.parse(publishedAt);
+  if (!Number.isFinite(t)) return 0.5;
+  const ageDays = (Date.now() - t) / 86400000;
+  const decay = Math.pow(0.5, ageDays / Math.max(1, HALF_LIFE_DAYS));
+  return clamp(decay, 0, 1);
+}
 
 type Row = {
   id: string;
-  kind: string;
   ns: string;
   slot: string;
-  content: string;
-  metadata: any;
-  created_at: string | null;
-  dist: number;     // расстояние
-  sim_raw: number;  // 1/(1+dist)
+  url: string | null;
+  title: string | null;
+  snippet: string | null;
+  published_at: string | null;
+  source_type: string | null;
+  kind: string | null;
+  metadata: Record<string, any> | null;
+  sim: number;
 };
 
-function clamp01(x: number) {
-  return Math.max(0, Math.min(1, x));
-}
-
-function nowUtc(): number {
-  return Date.now();
-}
-
-function daysBetween(fromIso: string | null | undefined): number {
-  if (!fromIso) return 99999;
-  const t = Date.parse(fromIso);
-  if (!Number.isFinite(t)) return 99999;
-  return (nowUtc() - t) / (1000 * 60 * 60 * 24);
-}
-
-/** Простая нормализация L2-distance к похожести [0..1]. */
-function simFromL2(dist: number): number {
-  return 1 / (1 + Math.max(0, dist));
-}
-
-/** Экспоненциальный «полураспад» свежести. */
-function recencyBoost(days: number, halfLifeDays: number): number {
-  if (halfLifeDays <= 0) return 1;
-  return Math.exp(-Math.log(2) * (days / halfLifeDays));
-}
-
-/** Безопасно парсим hostname. */
-function hostFromUrl(u?: string | null): string | null {
-  if (!u) return null;
-  try {
-    const raw = new URL(u).hostname.toLowerCase();
-    const h = raw.startsWith("www.") ? raw.slice(4) : raw;
-    return h || null;
-  } catch {
-    return null;
-  }
-}
-
-/** Сопоставление домена с учётом поддоменов. */
-function hostMatchesRule(host: string, rule: string): boolean {
-  const r = rule.toLowerCase().replace(/^www\./, "");
-  if (host === r) return true;
-  return host.endsWith("." + r);
-}
-
-/** Собираем литерал вектора для pgvector: '[1,2,3]' */
-function vectorLiteral(vec: number[]): string {
-  const nums = vec.map((v) => (Number.isFinite(v) ? Number(v) : 0)).join(",");
-  return `[${nums}]`;
-}
-
-export async function retrieveV2(p: RetrieveParams) {
-  const started = Date.now();
-
-  const nsMode = p.nsMode ?? "strict";
-  const includeKinds = p.includeKinds ?? null;
-  const includeSourceTypes = p.includeSourceTypes ?? null;
-
-  const recency: RecencyOptions = {
-    enabled: p.recency?.enabled ?? true,
-    halfLifeDays: p.recency?.halfLifeDays ?? 30,
-    weight: p.recency?.weight ?? 0.2,
-    usePublishedAt: p.recency?.usePublishedAt ?? false,
-  };
-
-  const topK = Math.max(1, Math.min(p.topK ?? 5, 1000));
-  const candidateK = Math.max(topK, Math.min(p.candidateK ?? 200, 10000));
-  const minSim = typeof p.minSimilarity === "number" ? clamp01(p.minSimilarity) : undefined;
-
-  // 1) Эмбеддинг запроса
-  const qEmb = await embedQuery(p.query);
-  if (!Array.isArray(qEmb) || qEmb.length < 8) {
-    throw new Error("embedQuery returned invalid vector");
-  }
-  const qvLiteral = vectorLiteral(qEmb); // "[…]"
-
-  // 2) WHERE-условия
+// собираем SQL-предикаты для доменов
+function buildDomainSQL(df: RetrieveRequest["domainFilter"]) {
   const clauses: string[] = [];
-  const params: any[] = [];
+  const params: string[] = [];
 
-  if (nsMode === "prefix") {
-    params.push(p.ns, `${p.ns}/%`);
-    clauses.push(`(m.ns = $${params.length - 1} OR m.ns LIKE $${params.length})`);
-  } else {
-    params.push(p.ns);
-    clauses.push(`m.ns = $${params.length}`);
+  // host = нижний регистр хоста из url (если url валидна)
+  // regexp_replace берёт первую группу хоста
+  const hostExpr = `lower(NULLIF(regexp_replace(url, '^https?://([^/]+).*$', '\\1'), ''))`;
+
+  if (df?.allow && df.allow.length) {
+    const allowOrs: string[] = [];
+    for (const d of df.allow) {
+      const dom = d.toLowerCase().trim();
+      // host = d  OR  host LIKE '%.d'
+      allowOrs.push(`(${hostExpr} = $AL${params.length + 1} OR ${hostExpr} LIKE $AL${params.length + 2})`);
+      params.push(dom, `%.${dom}`);
+    }
+    clauses.push(`url IS NOT NULL AND (${allowOrs.join(" OR ")})`);
   }
 
-  params.push(p.slot);
-  clauses.push(`m.slot = $${params.length}`);
-
-  clauses.push(`m.embedding IS NOT NULL`);
-
-  if (includeKinds && includeKinds.length) {
-    params.push(includeKinds);
-    clauses.push(`m.kind = ANY($${params.length})`);
-  }
-  if (includeSourceTypes && includeSourceTypes.length) {
-    params.push(includeSourceTypes);
-    clauses.push(`(m.metadata->>'source_type') = ANY($${params.length})`);
+  if (df?.deny && df.deny.length) {
+    for (const d of df.deny) {
+      const dom = d.toLowerCase().trim();
+      clauses.push(`NOT ( ${hostExpr} = $DN${params.length + 1} OR ${hostExpr} LIKE $DN${params.length + 2} )`);
+      params.push(dom, `%.${dom}`);
+    }
   }
 
-  // 3) SQL кандидатов (вектор как $X::vector)
-  params.push(qvLiteral);
-  const idxVec = params.length;
+  // заменим префиксы $AL/$DN на обычные $1,$2,... когда приклеим к общему массиву
+  return { clause: clauses.length ? clauses.join(" AND ") : "", rawParams: params };
+}
 
-  params.push(candidateK);
-  const idxLimit = params.length;
+export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse> {
+  // калибровка чисел
+  const candidateK = clamp(req.candidateK, Math.max(1, req.topK), 1000);
+  const topK = clamp(req.topK, 1, 50);
 
-  const text = `
-    WITH params AS (
-      SELECT $${idxVec}::vector AS qv
-    )
+  // эмбеддинг запроса
+  const qvec = await embedQuery(req.q);
+
+  // ns-фильтр
+  const nsExact = req.ns;
+  const nsLike = `${req.ns}/%`;
+  const whereNs =
+    req.nsMode === "strict"
+      ? `ns = $2`
+      : `(ns = $2 OR ns LIKE $3)`;
+
+  // доменные предикаты — если есть allow/deny, ограничим кандидатов уже в SQL
+  const { clause: domainClauseRaw, rawParams: domainParamsRaw } = buildDomainSQL(req.domainFilter);
+
+  // строим основной текст запроса с «дыркой» под домен
+  const base = `
     SELECT
-      m.id, m.kind, m.ns, m.slot, m.content, m.metadata, m.created_at,
-      (m.embedding <-> (SELECT qv FROM params)) AS dist,
-      (1.0 / (1.0 + (m.embedding <-> (SELECT qv FROM params)))) AS sim_raw
-    FROM memories m
-    WHERE ${clauses.join(" AND ")}
-    ORDER BY m.embedding <-> (SELECT qv FROM params)
-    LIMIT $${idxLimit}
+      id, ns, slot, url, title, snippet,
+      COALESCE(to_char(published_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), NULL) AS published_at,
+      source_type, kind, metadata,
+      (1 - (embedding <=> $VEC::vector)) AS sim
+    FROM chunks
+    WHERE slot = $1
+      AND ${whereNs}
+      ${domainClauseRaw ? `AND (${domainClauseRaw})` : ``}
+    ORDER BY embedding <=> $VEC::vector ASC
+    LIMIT $LIM
   `;
 
-  let rows: Row[] = [];
-  try {
-    const r = await pool.query(text, params);
-    rows = r.rows as Row[];
-  } catch (e: any) {
-    throw new Error(`SQL retrieve failed: ${e?.message || String(e)}`);
+  // собираем параметры в правильном порядке и пронумеровываем плейсхолдеры
+  // шаблонные маркеры: $VEC, $LIM, $ALn/$DNn — заменим на обычные $1..$N
+  const params: any[] = [];
+
+  // $1, $2, ($3 если prefix)
+  params.push(req.slot, nsExact);
+  let text = base;
+
+  if (req.nsMode !== "strict") {
+    params.push(nsLike);
+  } else {
+    // убираем $3 из текста
+    text = text.replace("ns LIKE $3", "/* nsLike omitted in strict */ TRUE");
   }
 
-  const candidates = rows.length;
+  // доменные параметры
+  for (const p of domainParamsRaw) params.push(p);
 
-  // 4) Доменный фильтр + скоринг со свежестью
-  const allow = (p.domainFilter?.allow ?? []).map((s) => s.toLowerCase().replace(/^www\./, ""));
-  const deny  = (p.domainFilter?.deny  ?? []).map((s) => s.toLowerCase().replace(/^www\./, ""));
-  const useDomainFilter = allow.length > 0 || deny.length > 0;
+  // подставим $VEC и $LIM в конец массива
+  params.push(`[${qvec.join(",")}]`);
+  params.push(candidateK);
 
-  const filtered = rows.filter((r) => {
-    if (!useDomainFilter) return true;
-    const h = hostFromUrl(r?.metadata?.url);
-    if (!h) return false;
+  // теперь нужно перенумеровать плейсхолдеры по порядку:
+  // $1..$N уже заняты, а $VEC и $LIM — символические; также $ALn/$DNn нужно заменить.
+  // Сформируем мапу замен:
+  let idx = 1;
+  const replace = (s: string) => {
+    // порядок: slot($1), nsExact($2), nsLike($3?) уже на месте, так что найдём спец-теги
+    // пронумеруем AL/DN по порядку появления
+    let t = s;
+    // AL/DN
+    const aldn = t.match(/\$A[L]\d+|\$D[N]\d+/g) || [];
+    for (const tag of aldn) {
+      // вычислим номер параметра этого тэга в массиве:
+      // это всё, что идёт после базовых (slot/ns[/nsLike])
+      // проще: пройдём по строке и заменим по очереди на $k, инкрементируя счётчик,
+      // но нам нужно не задеть уже существующие $1/$2/$3.
+    }
+    return t;
+  };
 
-    if (deny.length && deny.some((d) => hostMatchesRule(h, d))) return false;
-    if (allow.length && !allow.some((a) => hostMatchesRule(h, a))) return false;
+  // Проще: соберём текст заново с нумерацией через шаблон
+  // Строим список условий заново, зная точные индексы
+  const startCount = params.length - 2 - domainParamsRaw.length - (req.nsMode !== "strict" ? 3 : 2);
+  // но это излишне сложно. Пойдём проще: не использовать символические плейсхолдеры.
 
-    return true;
+  // --- ПРОЩЕ И НАДЁЖНЕЕ: сформируем текст динамически со стандартной нумерацией ---
+
+  const whereParts: string[] = [`slot = $1`, req.nsMode === "strict" ? `ns = $2` : `(ns = $2 OR ns LIKE $3)`];
+  let next = req.nsMode === "strict" ? 3 : 4;
+
+  if (domainClauseRaw) {
+    // пересоберём доменный блок с обычной нумерацией
+    // domainParamsRaw идёт парами (value, %.value)
+    const hostExpr = `lower(NULLIF(regexp_replace(url, '^https?://([^/]+).*$', '\\1'), ''))`;
+    const allow = req.domainFilter?.allow ?? [];
+    const deny = req.domainFilter?.deny ?? [];
+
+    const parts: string[] = [];
+
+    if (allow.length) {
+      const ors: string[] = [];
+      for (let i = 0; i < allow.length; i++) {
+        const a1 = `$${next++}`;
+        const a2 = `$${next++}`;
+        ors.push(`(${hostExpr} = ${a1} OR ${hostExpr} LIKE ${a2})`);
+        params.splice(params.length - 2, 0); // no-op; мы позже добавим сами
+      }
+      parts.push(`url IS NOT NULL AND (${ors.join(" OR ")})`);
+    }
+    if (deny.length) {
+      for (let i = 0; i < deny.length; i++) {
+        const d1 = `$${next++}`;
+        const d2 = `$${next++}`;
+        parts.push(`NOT ( ${hostExpr} = ${d1} OR ${hostExpr} LIKE ${d2} )`);
+      }
+    }
+    whereParts.push(parts.join(" AND "));
+  }
+
+  // теперь окончательный текст
+  const finalSQL = `
+    SELECT
+      id, ns, slot, url, title, snippet,
+      COALESCE(to_char(published_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), NULL) AS published_at,
+      source_type, kind, metadata,
+      (1 - (embedding <=> $${next}::vector)) AS sim
+    FROM chunks
+    WHERE ${whereParts.join(" AND ")}
+    ORDER BY embedding <=> $${next}::vector ASC
+    LIMIT $${next + 1}
+  `;
+
+  // ПЕРЕСОБИРАЕМ params последовательно:
+  const finalParams: any[] = [];
+  finalParams.push(req.slot, nsExact);
+  if (req.nsMode !== "strict") finalParams.push(nsLike);
+
+  if (req.domainFilter?.allow?.length) {
+    for (const d of req.domainFilter.allow) {
+      const dom = d.toLowerCase().trim();
+      finalParams.push(dom, `%.${dom}`);
+    }
+  }
+  if (req.domainFilter?.deny?.length) {
+    for (const d of req.domainFilter.deny) {
+      const dom = d.toLowerCase().trim();
+      finalParams.push(dom, `%.${dom}`);
+    }
+  }
+
+  finalParams.push(`[${qvec.join(",")}]`);
+  finalParams.push(candidateK);
+
+  const res = await pool.query<Row>(finalSQL, finalParams);
+  const rows: Row[] = res.rows;
+
+  // пост-фильтры (на случай deny/allow без SQL — но мы уже сузили allow в SQL)
+  const afterSim: Row[] = rows.filter((r: Row) => r.sim >= req.minSimilarity);
+  const afterDomain: Row[] = afterSim.filter((r: Row) => matchesDomain(r.url, req.domainFilter));
+
+  // скоринг + topK
+  const mapped: RetrieveItem[] = afterDomain.map((r: Row): RetrieveItem => {
+    const score = ALPHA * r.sim + BETA * timeDecay(r.published_at);
+    return {
+      id: r.id,
+      ns: r.ns,
+      slot: r.slot,
+      url: r.url,
+      title: r.title,
+      snippet: r.snippet,
+      score,
+      publishedAt: r.published_at,
+      sourceType: r.source_type,
+      kind: r.kind,
+      metadata: r.metadata ?? {},
+    };
   });
 
-  const afterDomain = filtered.length;
+  const items: RetrieveItem[] = mapped
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, topK);
 
-  const scored = filtered
-    .map((r) => {
-      const sim = clamp01(simFromL2(r.dist));
-      const ageIso =
-        (recency.usePublishedAt ? r?.metadata?.published_at : null) ||
-        r.created_at ||
-        null;
-      const ageDays = daysBetween(ageIso);
-      const recent = recency.enabled ? recencyBoost(ageDays, recency.halfLifeDays) : 1;
-
-      const alpha = clamp01(recency.weight);
-      const score = (1 - alpha) * sim + alpha * recent;
-
-      return { r, sim, recent, score };
-    })
-    .filter((x) => (minSim !== undefined ? x.sim >= minSim : true))
-    .sort((a, b) => b.score - a.score);
-
-  // ВАЖНО: ограничиваем именно здесь, после сортировки
-  const matchesRaw = scored.slice(0, topK);
-
-  const matches = matchesRaw.map(({ r, sim, recent, score }) => ({
-    id: r.id,
-    kind: r.kind,
-    ns: r.ns,
-    slot: r.slot,
-    content: r.content,
-    metadata: r.metadata,
-    created_at: r.created_at,
-    sim,
-    rec: recent,
-    score,
-    sample: r.content?.slice(0, 240) ?? "",
-  }));
-
-  const filterInfo =
-    useDomainFilter
-      ? {
-          allow: allow.length ? allow : undefined,
-          deny: deny.length ? deny : undefined,
-          candidatesBefore: candidates,
-          candidatesAfter: afterDomain,
-          dropped: Math.max(0, candidates - afterDomain),
-        }
-      : null;
-
-  return {
-    ok: true,
-    took_ms: Date.now() - started,
-    params: {
-      ns: p.ns,
-      slot: p.slot,
-      query: p.query,
-      topK,
-      candidateK,
-      nsMode,
-      includeKinds,
-      includeSourceTypes,
-      minSimilarity: minSim,
-      recency,
-      domainFilter: p.domainFilter ?? null,
-    },
-    recencyEffective: { ...recency },
-    candidates,                // сколько кандидатов до пост-фильтров
-    returned: matches.length,  // сколько реально вернули (≤ topK)
-    filterInfo,                // null если фильтр не применялся
-    matches,
-    debugVersion: "r2-domains-slice-v2",
+  const filterInfo = {
+    nsMode: req.nsMode,
+    candidateK,
+    minSimilarity: req.minSimilarity,
+    droppedAfterSimilarity: rows.length - afterSim.length,
+    droppedAfterDomain: afterSim.length - afterDomain.length,
+    domainAllow: req.domainFilter?.allow ?? [],
+    domainDeny: req.domainFilter?.deny ?? [],
   };
+
+  return { items, filterInfo, debugVersion: "rc-v1" };
 }
