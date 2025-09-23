@@ -16,3 +16,19 @@ Thumbs.db
 # runtime payload
 apps/web/answer.json
  .env.local 
+
+# local/env
+apps/web/.env.local
+
+# bundles & tmp
+apps/web/_sanity_bundle/
+apps/web/sanity-bundle-*.tar.gz
+apps/web/eval_reports/
+*.log
+.DS_Store
+apps/web/.env.local
+apps/web/_sanity_bundle/
+apps/web/sanity-bundle-*.tar.gz
+apps/web/eval_reports/
+*.log
+.DS_Store
