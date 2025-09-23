@@ -6,8 +6,8 @@ import {
   RetrieveResponse,
   RetrieveItem,
   clamp,
-  matchesDomain,
 } from "@/lib/retrieval-contract";
+import { matchesDomain } from "@/lib/domain_filter";
 
 const ALPHA = Number(process.env.RETRIEVE_ALPHA ?? 0.85);
 const BETA = Number(process.env.RETRIEVE_BETA ?? 0.15);
