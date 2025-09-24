@@ -1,63 +1,60 @@
-// apps/web/src/app/api/retrieve/route.ts
 import { NextResponse } from "next/server";
-import { retrieveV2 } from "@/lib/retriever_v2";
-import type {
+import {
   RetrieveRequest,
   RetrieveResponse,
+  Slot,
   NsMode,
+  DomainFilter,
+  clamp,
 } from "@/lib/retrieval-contract";
+import { retrieveV2 } from "@/lib/retriever_v2";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type Body = {
-  q: string;
-  ns: string;
-  slot?: "staging" | "prod" | string | null;
-  topK?: number;
-  candidateK?: number;
-  minSimilarity?: number;
-  nsMode?: NsMode;
-  domainFilter?: { allow?: string[]; deny?: string[] } | null;
-};
-
 export async function POST(req: Request) {
   try {
-    const b = (await req.json()) as Body;
+    const body = (await req.json()) as Partial<RetrieveRequest>;
 
-    // обязательные поля
-    if (!b?.q || !b?.ns) {
+    // минимальная валидация
+    const q = String(body.q ?? "").trim();
+    const ns = String(body.ns ?? "").trim();
+    const slot = (body.slot ?? "staging") as Slot;
+
+    if (!q) {
       return NextResponse.json(
-        { error: "q and ns are required" },
+        [{ code: "invalid_type", expected: "string", received: "undefined", path: ["q"], message: "Required" }],
+        { status: 400 }
+      );
+    }
+    if (!ns) {
+      return NextResponse.json(
+        [{ code: "invalid_type", expected: "string", received: "undefined", path: ["ns"], message: "Required" }],
+        { status: 400 }
+      );
+    }
+    if (slot !== "staging" && slot !== "prod") {
+      return NextResponse.json(
+        [{ code: "invalid_enum", path: ["slot"], message: "slot must be 'staging'|'prod'" }],
         { status: 400 }
       );
     }
 
-    // нормализация
-    const slot = (b.slot === "prod" ? "prod" : "staging") as "staging" | "prod";
-    const topK = Math.max(1, Math.min(Number(b.topK ?? 5), 50));
-    const candidateK = Math.max(topK, Math.min(Number(b.candidateK ?? 200), 1000));
-    const minSimilarity = Math.max(0, Math.min(Number(b.minSimilarity ?? 0), 1));
-    const nsMode: NsMode = b.nsMode === "strict" ? "strict" : "prefix";
-
-    const body: RetrieveRequest = {
-      q: String(b.q),
-      ns: String(b.ns),
+    const req2: RetrieveRequest = {
+      q,
+      ns,
       slot,
-      topK,
-      candidateK,
-      minSimilarity,
-      nsMode,
-      domainFilter: b.domainFilter ?? null,
+      topK: clamp(body.topK, 1, 50),
+      candidateK: clamp(body.candidateK, 50, 1000),
+      minSimilarity: clamp(body.minSimilarity, 0, 1),
+      nsMode: (body.nsMode ?? "prefix") as NsMode,
+      domainFilter: (body.domainFilter ?? undefined) as DomainFilter | undefined,
     };
 
-    const out: RetrieveResponse = await retrieveV2(body);
-    return NextResponse.json(out, { status: 200 });
+    const out: RetrieveResponse = await retrieveV2(req2);
+    return NextResponse.json(out);
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
   }
 }
 

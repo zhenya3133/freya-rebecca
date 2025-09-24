@@ -13,25 +13,48 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
+
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"],
-      "@lib/*": ["./src/lib/*"]
+      "@/*": ["src/*"],
+      "@lib/*": ["src/lib/*"]
     },
+
+    "types": ["node"],
+
     "plugins": [{ "name": "next" }]
   },
+
+  // ВАЖНО: whitelist только рабочие части проекта
   "include": [
     "next-env.d.ts",
-    "src/**/*.ts",
-    "src/**/*.tsx",
+
+    // ядро
+    "src/lib/**/*.ts",
+
+    // единый ретривер RC-v1
+    "src/app/api/retrieve/**/*.ts",
+
+    // минимальные инжесты
+    "src/app/api/ingest/url/**/*.ts",
+    "src/app/api/ingest/pdf/**/*.ts",
+    "src/app/api/ingest/github/**/*.ts",
+
     ".next/types/**/*.ts"
   ],
+
+  // Явно исключаем всё «старое»/архивное, чтобы tsc не стрелялся
   "exclude": [
     "node_modules",
-    "scripts",                         // apps/web/scripts/** (не нужно tsc)
-    "src/app/api/_archive/**",         // исторические ручки
-    "src/app/api/rag/**",              // старые RAG ручки
-    "src/app/api/memory/**",           // старые memories ручки
-    "src/lib/rag-core.ts"              // старое ядро RAG (не используется)
+    "src/app/api/rag/**/*",
+    "src/app/api/memory/**/*",
+    "src/app/api/rebecca/**/*",
+    "src/app/api/_archive/**/*",
+    "src/app/api/maint/**/*",
+    "src/app/api/diag/**/*",
+    "src/app/api/ingest/youtube/**/*",
+    "src/app/api/ingest/seed/**/*",
+    "src/lib/rag-core.ts",
+    "src/lib/suggestNs.ts"
   ]
 }

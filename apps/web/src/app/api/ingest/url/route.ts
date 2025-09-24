@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
 import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
+import { sourceIdForUrl } from "@/lib/source_id";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,9 +9,9 @@ export const dynamic = "force-dynamic";
 type Body = {
   ns: string;
   slot?: "staging" | "prod" | string | null;
-  kind?: string | null;                 // "url" по умолчанию
   urls: string[];
-  chunk?: { chars?: number; overlap?: number };
+  kind?: string | null; // default: "url"
+  chunk?: { chars?: number; overlap?: number } | null;
 };
 
 function assertAdmin(req: Request) {
@@ -23,79 +24,98 @@ function assertAdmin(req: Request) {
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-async function fetchTextOrPdf(url: string): Promise<{ type: "text" | "pdf"; text?: string; buf?: Buffer; ctype?: string }> {
-  const r = await fetch(url, { redirect: "follow", headers: { "User-Agent": UA, Accept: "*/*" } });
-  if (!r.ok) throw new Error(`GET ${url} -> ${r.status} ${r.statusText}`);
-  const ct = r.headers.get("content-type") || "";
-  if (ct.includes("application/pdf") || url.toLowerCase().endsWith(".pdf")) {
-    const ab = await r.arrayBuffer();
-    return { type: "pdf", buf: Buffer.from(ab), ctype: ct };
+async function fetchText(url: string): Promise<string> {
+  const res = await fetch(url, {
+    method: "GET",
+    redirect: "follow",
+    headers: {
+      "User-Agent": UA,
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+    },
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  // Только текст/HTML берём здесь. Для PDF есть отдельный /ingest/pdf
+  if (ct.includes("pdf")) {
+    throw new Error("got PDF (use /api/ingest/pdf)");
   }
-  return { type: "text", text: await r.text(), ctype: ct };
+  const html = await res.text();
+  return htmlToPlain(html);
 }
 
-// очень простой «выколачиватель» текста из HTML (нам хватает)
-function htmlToText(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+function htmlToPlain(html: string): string {
+  try {
+    let s = html;
+    // вырезаем <script>/<style>
+    s = s.replace(/<script[\s\S]*?<\/script>/gi, " ");
+    s = s.replace(/<style[\s\S]*?<\/style>/gi, " ");
+    // теги в пробел
+    s = s.replace(/<[^>]+>/g, " ");
+    // декод простых сущностей
+    s = s
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+    // нормализация пробелов
+    s = s.replace(/\s+/g, " ").trim();
+    return s;
+  } catch {
+    return html;
+  }
 }
 
 export async function POST(req: Request) {
   const t0 = Date.now();
-  let stage: string | null = null;
+  let stage = "init";
   try {
     assertAdmin(req);
-    stage = "init";
     const body = (await req.json()) as Body;
-
-    const ns   = (body.ns || "").trim();
-    const slot = ((body.slot || "staging") as "staging" | "prod");
-    const kind = (body.kind || "url");
-    const urls = Array.isArray(body.urls) ? body.urls.filter(Boolean) : [];
-    const opts = normalizeChunkOpts(body.chunk);
+    const ns = (body.ns || "").trim();
+    const slot = (body.slot || "staging").trim() as "staging" | "prod";
+    const urls = Array.isArray(body.urls) ? body.urls.map(String) : [];
+    const kind = (body.kind || "url").trim();
+    const chunk = body.chunk || undefined;
 
     if (!ns || !urls.length) {
-      return NextResponse.json({ ok: false, error: "ns and urls are required" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "ns and urls are required" },
+        { status: 400 }
+      );
     }
     if (!["staging", "prod"].includes(slot)) {
-      return NextResponse.json({ ok: false, error: "slot must be 'staging'|'prod'" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "slot must be 'staging'|'prod'" },
+        { status: 400 }
+      );
     }
 
-    let textInserted = 0;
-    let textUpdated  = 0;
-    let textChunks   = 0;
-
-    // соберём документы, а PDF — делегируем в /api/ingest/pdf
+    stage = "fetch+chunk";
+    const opts = normalizeChunkOpts(chunk);
     const docs: IngestDoc[] = [];
-    const pdfQueue: { url: string }[] = [];
+    const failures: { url: string; error: string }[] = [];
+    let textChunks = 0;
 
-    stage = "fetch";
     for (const url of urls) {
       try {
-        const res = await fetchTextOrPdf(url);
-        if (res.type === "pdf") {
-          pdfQueue.push({ url });
-          continue;
-        }
-        const txt = htmlToText(res.text || "");
-        if (!txt) continue;
-
-        const parts = chunkText(txt, opts);
+        const text = await fetchText(url);
+        if (!text) continue;
+        const parts = chunkText(text, opts);
         textChunks += parts.length;
 
         const doc: IngestDoc = {
           ns,
           slot,
-          source_id: url,              // единая политика: source_id = URL
           url,
-          title: null,
-          published_at: null,
+          title: url,
+          source_id: sourceIdForUrl(url),
           source_type: "url",
           kind,
+          published_at: null,
           doc_metadata: {
             source_type: "url",
             url,
@@ -114,52 +134,31 @@ export async function POST(req: Request) {
           })),
         };
         docs.push(doc);
-      } catch (e) {
-        // копим ошибки на сторону клиента
-        console.warn("ingest/url: failed", url, String(e));
+      } catch (e: any) {
+        failures.push({ url, error: e?.message || String(e) });
       }
+    }
+
+    if (!docs.length) {
+      return NextResponse.json({
+        ok: true,
+        textChunks,
+        textInserted: 0,
+        textUpdated: 0,
+        failures,
+        ms: Date.now() - t0,
+      });
     }
 
     stage = "db";
-    if (docs.length) {
-      const r = await upsertChunks(docs);
-      textInserted += r.inserted;
-      textUpdated  += r.updated;
-    }
-
-    // PDF делегируем (последовательно — чтобы не спамить)
-    stage = "delegate-pdf";
-    let pdfDelegated = 0;
-    let pdfStats = { chunks: 0, written: 0 };
-    for (const p of pdfQueue) {
-      pdfDelegated++;
-      try {
-        const resp = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/ingest/pdf`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-admin-key": req.headers.get("x-admin-key") || "",
-          },
-          body: JSON.stringify({ ns, slot, url: p.url, kind: "pdf", chunk: opts }),
-        });
-        // мы не проваливаемся по ошибке; просто статистика
-        const j = await resp.json().catch(() => ({}));
-        if (j?.chunks) pdfStats.chunks += Number(j.chunks) || 0;
-        if (j?.textInserted) pdfStats.written += Number(j.textInserted) || 0;
-      } catch (e) {
-        console.warn("delegate pdf failed:", p.url, String(e));
-      }
-    }
+    const stats = await upsertChunks(docs);
 
     return NextResponse.json({
       ok: true,
-      ns, slot, urls,
-      pdfDelegated,
-      pdfStats,
       textChunks,
-      textInserted,
-      textUpdated,
-      failures: [],
+      textInserted: stats.inserted,
+      textUpdated: stats.updated,
+      failures,
       ms: Date.now() - t0,
     });
   } catch (e: any) {

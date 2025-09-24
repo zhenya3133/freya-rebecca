@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { embedMany } from "@/lib/embeddings";
-import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
+import { upsertChunks, IngestDoc } from "@/lib/ingest_upsert";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
 
 export const runtime = "nodejs";
@@ -8,11 +7,11 @@ export const dynamic = "force-dynamic";
 
 type Body = {
   ns: string;
-  url: string;
+  url: string;                   // исходный URL (или file:// для локалки)
   slot?: "staging" | "prod" | string | null;
   kind?: string | null;
   chunk?: { chars?: number; overlap?: number };
-  maxFileBytes?: number | null;
+  maxFileBytes?: number | null;  // лимит загрузки (байт), опционально
 };
 
 function assertAdmin(req: Request) {
@@ -31,14 +30,16 @@ async function importPdfParse(): Promise<(buf: Buffer) => Promise<any>> {
 async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
   if (url.startsWith("file://")) {
     const { readFile } = await import("node:fs/promises");
-    return readFile(url.slice("file://".length));
+    const p = url.slice("file://".length);
+    return readFile(p);
   }
   const r = await fetch(url, { redirect: "follow" });
-  if (!r.ok) throw new Error(`fetch failed: ${r.status} ${r.statusText}`);
+  if (!r.ok) throw new Error(`GET ${url} -> ${r.status} ${r.statusText}`);
   const reader = r.body?.getReader();
   if (!reader) return Buffer.from(await r.arrayBuffer());
   const parts: Uint8Array[] = [];
   let total = 0, limit = Number(maxBytes) || Infinity;
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -51,6 +52,7 @@ async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
   return Buffer.concat(parts);
 }
 
+// Фоллбэк: расплющиваем PDF через r.jina.ai (на случай 5xx)
 async function fetchPdfViaJina(url: string): Promise<string> {
   const enc = encodeURI(url).replace(/^https?:\/\//, "");
   const jina = `https://r.jina.ai/https://${enc}`;
@@ -61,15 +63,15 @@ async function fetchPdfViaJina(url: string): Promise<string> {
 
 export async function POST(req: Request) {
   const t0 = Date.now();
-  let stage: string = "init";
+  let stage = "init";
   try {
     assertAdmin(req);
     const body = (await req.json()) as Body;
 
-    const ns   = (body.ns || "").trim();
-    const url  = (body.url || "").trim();
+    const ns   = (body.ns   || "").trim();
+    const url  = (body.url  || "").trim();
     const slot = ((body.slot || "staging") as "staging" | "prod");
-    const kind = (body.kind || "pdf");
+    const kind = (body.kind  || "pdf");
     const opts = normalizeChunkOpts(body.chunk);
     const MAXB = Number.isFinite(Number(body.maxFileBytes)) ? Math.max(50_000, Number(body.maxFileBytes)) : undefined;
 
@@ -80,6 +82,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, stage, error: "slot must be 'staging'|'prod'" }, { status: 400 });
     }
 
+    // 1) достаём PDF
     stage = "download";
     let text = "";
     let pages: number | undefined;
@@ -92,22 +95,24 @@ export async function POST(req: Request) {
       text  = (out?.text || "").trim();
       pages = out?.numpages;
     } catch {
-      // сетевой fallback (alphaxiv и пр.)
+      // 2) фоллбэк через Jina Reader
       stage = "fallback-jina";
       text = (await fetchPdfViaJina(url)).trim();
     }
 
     if (!text) throw new Error("empty text extracted from PDF");
 
+    // 3) чанкинг
     stage = "chunk";
     const parts = chunkText(text, opts);
     if (!parts.length) throw new Error("no chunks produced");
 
+    // 4) upsert в chunks. Политика source_id: URL
     stage = "db";
     const doc: IngestDoc = {
       ns,
       slot,
-      source_id: url,
+      source_id: url,       // единая политика: URL как source_id
       url,
       title: null,
       published_at: null,
@@ -133,13 +138,15 @@ export async function POST(req: Request) {
       })),
     };
 
-    // upsert
-    await upsertChunks([doc]);
+    const { inserted, updated } = await upsertChunks([doc]);
 
     return NextResponse.json({
-      ok: true, ns, slot, url,
+      ok: true,
+      ns, slot, url,
       pages: pages ?? null,
       chunks: parts.length,
+      textInserted: inserted,
+      textUpdated: updated,
       ms: Date.now() - t0,
     });
   } catch (e: any) {
@@ -148,4 +155,8 @@ export async function POST(req: Request) {
       { status: 500 }
     );
   }
+}
+
+export function GET() {
+  return NextResponse.json({ error: "Method Not Allowed" }, { status: 405 });
 }

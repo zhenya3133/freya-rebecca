@@ -1,0 +1,16 @@
+## for-manus...origin/for-manus
+ M apps/web/package.json
+ M apps/web/src/app/api/ingest/github/route.ts
+ M apps/web/src/app/api/ingest/pdf/route.ts
+ M apps/web/src/app/api/ingest/url/route.ts
+ M apps/web/src/app/api/retrieve/route.ts
+ M apps/web/src/lib/db.ts
+ M apps/web/src/lib/ingest_upsert.ts
+ M apps/web/src/lib/retrieval-contract.ts
+ M apps/web/src/lib/retriever_v2.ts
+ M apps/web/tsconfig.json
+ M package-lock.json
+?? _manus_pack/
+?? apps/web/src/lib/source_id.ts
+?? apps/web/src/types/pdf-parse-shim.d.ts
+?? apps/web/src/types/pg-shim.d.ts

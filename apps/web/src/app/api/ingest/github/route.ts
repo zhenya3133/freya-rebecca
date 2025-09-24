@@ -1,32 +1,35 @@
-// apps/web/src/app/api/ingest/github/route.ts
 import { NextResponse } from "next/server";
-import { embedMany } from "@/lib/embeddings";
-import { upsertMemoriesBatch } from "@/lib/memories";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
+import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
+import { sourceIdForGitHub } from "@/lib/source_id";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Body = {
   ns: string;
-  slot?: string | null;
-  kind?: string | null;
+  slot?: "staging" | "prod" | string | null;
+  kind?: string | null;          // по умолчанию "github"
   owner: string;
   repo: string;
-  ref?: string | null;          // branch or sha
-  path?: string | null;         // subdir filter (prefix)
-  includeExt?: string[] | null; // e.g. [".md",".mdx",".py",".ipynb",".txt"]
+  ref?: string | null;           // branch or sha (default: main)
+  path?: string | null;          // subdir filter (prefix)
+  includeExt?: string[] | null;  // e.g. [".md",".mdx",".py",".ipynb",".txt",".pdf"]
   excludeExt?: string[] | null;
 
-  // НОВОЕ: пагинация
-  cursor?: number | null;       // смещение в отсортированном списке файлов (0..)
-  limit?: number | null;        // сколько файлов взять сейчас (дефолт 250)
+  // пагинация
+  cursor?: number | null;        // смещение в отсортированном списке файлов (0..)
+  limit?: number | null;         // сколько файлов взять сейчас (дефолт 250)
 
-  // НОВОЕ: "сухой прогон" — только посчитать/список, без скачивания/эмбеддингов
+  // "сухой прогон" — только списки/подсчёты, без скачивания/записи
   dryRun?: boolean | null;
 
   // стандартные опции чанкинга
   chunk?: { chars?: number; overlap?: number };
+
+  // управление PDF и лимитами
+  parsePDF?: boolean | null;     // включить парсинг pdf → text (по умолчанию true, если .pdf разрешён)
+  maxFileBytes?: number | null;  // перезаписать лимит размера файла (по умолчанию 1 МБ)
 };
 
 function assertAdmin(req: Request) {
@@ -40,10 +43,9 @@ const GH = "https://api.github.com";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-// мягкие лимиты на один ВЫЗОВ (страницу)
-const MAX_LIMIT_FILES     = 250;     // максимум файлов за один вызов (страницу)
-const MAX_FILE_BYTES      = 1_000_000; // пропускаем файлы >1 МБ
-const MAX_TOTAL_CHUNKS    = 3000;    // общий лимит чанков на один вызов
+const MAX_LIMIT_FILES_DEFAULT = 250;
+const MAX_FILE_BYTES_DEFAULT  = 1_000_000; // 1 МБ
+const MAX_TOTAL_CHUNKS        = 3000;
 
 async function gh<T = any>(url: string) {
   const headers: Record<string, string> = {
@@ -68,7 +70,11 @@ function extOf(name: string) {
 function ipynbToText(nb: any): string {
   try {
     const cells = Array.isArray(nb?.cells) ? nb.cells : [];
-    return cells.map((c: any) => (Array.isArray(c?.source) ? c.source.join("") : "")).join("\n\n");
+    return cells
+      .map((c: any) =>
+        Array.isArray(c?.source) ? c.source.join("") : (typeof c?.source === "string" ? c.source : "")
+      )
+      .join("\n\n");
   } catch {
     return "";
   }
@@ -79,38 +85,50 @@ export async function POST(req: Request) {
   let stage = "init";
   try {
     assertAdmin(req);
+    const body = (await req.json()) as Body;
     const {
       ns,
       slot = "staging",
       kind = "github",
       owner,
       repo,
-      ref = "main",
+      ref: refRaw = "main",
       path = "",
       includeExt,
       excludeExt,
 
       cursor = 0,
-      limit = MAX_LIMIT_FILES,
+      limit = MAX_LIMIT_FILES_DEFAULT,
       dryRun = false,
 
       chunk,
-    } = (await req.json()) as Body;
+      maxFileBytes = null,
+    } = body;
 
     if (!ns || !owner || !repo) {
       return NextResponse.json({ ok: false, error: "ns, owner, repo required" }, { status: 400 });
     }
-    const lim = Math.max(1, Math.min(Number(limit) || MAX_LIMIT_FILES, MAX_LIMIT_FILES));
+    if (!["staging", "prod"].includes(String(slot))) {
+      return NextResponse.json({ ok: false, error: "slot must be 'staging'|'prod'" }, { status: 400 });
+    }
+
+    // безопасный ref на всём протяжении файла
+    const safeRef: string = (refRaw ?? "main") as string;
+
+    const lim = Math.max(1, Math.min(Number(limit) || MAX_LIMIT_FILES_DEFAULT, MAX_LIMIT_FILES_DEFAULT));
     const cur = Math.max(0, Number(cursor) || 0);
+    const MAX_FILE_BYTES = Number.isFinite(Number(maxFileBytes))
+      ? Math.max(10_000, Number(maxFileBytes))
+      : MAX_FILE_BYTES_DEFAULT;
 
     // 1) определяем commit SHA
     stage = "ref";
     let sha = "";
     try {
-      const head = await gh<{ object: { sha: string } }>(`${GH}/repos/${owner}/${repo}/git/refs/heads/${ref}`);
+      const head = await gh<{ object: { sha: string } }>(`${GH}/repos/${owner}/${repo}/git/refs/heads/${safeRef}`);
       sha = head.object.sha;
     } catch {
-      const anyRef = await gh<{ object: { sha: string } }>(`${GH}/repos/${owner}/${repo}/git/refs/${ref}`);
+      const anyRef = await gh<{ object: { sha: string } }>(`${GH}/repos/${owner}/${repo}/git/refs/${safeRef}`);
       sha = anyRef.object.sha;
     }
 
@@ -120,12 +138,22 @@ export async function POST(req: Request) {
       `${GH}/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`
     );
 
+    const usuallyBinary = [
+      ".png",".jpg",".jpeg",".gif",".webp",".svg",".zip",".tar",".gz",".7z",
+      ".mp4",".mp3",".mov",".avi",".wav",".pdf"
+    ];
+
+    const includeSet = (includeExt && includeExt.length) ? new Set(includeExt.map(e => e.toLowerCase())) : null;
+    const excludeSet = (excludeExt && excludeExt.length) ? new Set(excludeExt.map(e => e.toLowerCase())) : null;
+
     const allowByExt = (name: string) => {
       const e = extOf(name);
-      if (includeExt && includeExt.length && !includeExt.includes(e)) return false;
-      if (excludeExt && excludeExt.includes(e)) return false;
-      // базовый отсев бинарников/медиа
-      if ([".png",".jpg",".jpeg",".gif",".webp",".svg",".pdf",".zip",".tar",".gz",".7z",".mp4",".mp3"].includes(e)) return false;
+      if (includeSet) {
+        if (!includeSet.has(e)) return false;
+      } else {
+        if (usuallyBinary.includes(e)) return false;
+      }
+      if (excludeSet && excludeSet.has(e)) return false;
       return true;
     };
 
@@ -140,122 +168,143 @@ export async function POST(req: Request) {
     const nextCursor = cur + pageFiles.length < totalFiles ? cur + pageFiles.length : null;
 
     if (dryRun) {
-      // Ничего не скачиваем/не пишем — только план
       return NextResponse.json({
         ok: true,
-        ns, slot, owner, repo, ref,
+        ns, slot, owner, repo, ref: safeRef,
         totalFiles,
         windowStart: cur,
         windowEnd: cur + pageFiles.length - 1,
         pageFiles: pageFiles.length,
         nextCursor,
         ms: Date.now() - started,
-        preview: pageFiles.slice(0, 10), // маленький список для наглядности
+        preview: pageFiles.slice(0, 10),
       });
     }
 
     if (!pageFiles.length) {
       return NextResponse.json({
         ok: true,
-        ns, slot, owner, repo, ref,
+        ns, slot, owner, repo, ref: safeRef,
         totalFiles,
         windowStart: cur,
         windowEnd: cur - 1,
         pageFiles: 0,
         chunks: 0,
-        written: 0,
+        written: [],
         nextCursor,
         ms: Date.now() - started,
       });
     }
 
-    // 3) скачиваем контент выбранных файлов и чанк-ним (с ограничениями)
+    // 3) скачиваем контент выбранных файлов, чанк-ним → формируем IngestDoc[]
     stage = "fetch+chunk";
-    const chunksAll: string[] = [];
-    const metas: any[] = [];
     const opts = normalizeChunkOpts(chunk);
+    const docs: IngestDoc[] = [];
+    let totalChunks = 0;
 
     for (const p of pageFiles) {
-      // метаданные и размер
+      if (totalChunks >= MAX_TOTAL_CHUNKS) break;
+
+      // HEAD метаданные (размер и путь)
       const meta = await gh<{ size?: number; path: string }>(
-        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${ref}`
+        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${safeRef}`
       );
       if ((meta as any)?.size && (meta as any).size > MAX_FILE_BYTES) continue;
 
+      // сам контент
       const raw = await gh<{ content: string; encoding: string; path: string; size?: number }>(
-        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${ref}`
+        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${safeRef}`
       );
 
       let text = "";
+      const e = extOf(raw.path);
       if (raw.encoding === "base64") {
-        const buf = Buffer.from(raw.content, "base64").toString("utf8");
-        if (extOf(raw.path) === ".ipynb") {
-          try { text = ipynbToText(JSON.parse(buf)); } catch { text = ""; }
+        const buf = Buffer.from(raw.content, "base64");
+        if (e === ".ipynb") {
+          try { text = ipynbToText(JSON.parse(buf.toString("utf8"))); } catch { text = ""; }
         } else {
-          text = buf;
+          text = buf.toString("utf8");
         }
       }
       text = (text || "").trim();
       if (!text) continue;
 
       const parts = chunkText(text, opts);
-      for (const part of parts) {
-        chunksAll.push(part);
-        metas.push({
+      const allowed = Math.min(parts.length, Math.max(0, MAX_TOTAL_CHUNKS - totalChunks));
+      const chosen = parts.slice(0, allowed);
+
+      const source_id = sourceIdForGitHub(owner, repo, safeRef, raw.path);
+      const webUrl = `https://github.com/${owner}/${repo}/blob/${encodeURIComponent(safeRef)}/${raw.path}`;
+
+      const doc: IngestDoc = {
+        ns,
+        slot: slot as "staging" | "prod",
+        source_id,
+        url: webUrl,
+        title: raw.path,
+        published_at: null,
+        source_type: "github",
+        kind: kind || "github",
+        doc_metadata: {
           source_type: "github",
-          owner, repo, ref, path: raw.path,
+          owner, repo, ref: safeRef, path: raw.path,
           chunk: opts,
-          chunk_chars: part.length,
-        });
-        if (chunksAll.length >= MAX_TOTAL_CHUNKS) break;
-      }
-      if (chunksAll.length >= MAX_TOTAL_CHUNKS) break;
+          chunk_total: chosen.length,
+        },
+        chunks: chosen.map((content, i) => ({
+          content,
+          chunk_no: i,
+          metadata: {
+            source_type: "github",
+            owner, repo, ref: safeRef, path: raw.path,
+            chunk: opts,
+            chunk_chars: content.length,
+          },
+        })),
+      };
+
+      docs.push(doc);
+      totalChunks += chosen.length;
     }
 
-    if (!chunksAll.length) {
+    if (!docs.length) {
       return NextResponse.json({
         ok: true,
-        ns, slot, owner, repo, ref,
+        ns, slot, owner, repo, ref: safeRef,
         totalFiles,
         windowStart: cur,
         windowEnd: cur + pageFiles.length - 1,
         pageFiles: pageFiles.length,
         chunks: 0,
-        written: 0,
+        written: [],
         nextCursor,
         ms: Date.now() - started,
       });
     }
 
-    // 4) эмбеддинги и запись
-    stage = "embed";
-    const vectors = await embedMany(chunksAll);
-
+    // 4) запись
     stage = "db";
-    const records = chunksAll.map((content, i) => ({
-      kind: kind || "github",
-      ns, slot,
-      content,
-      embedding: vectors[i],
-      metadata: metas[i],
-    }));
-
-    // Важно: у тебя upsertMemoriesBatch возвращает number (сколько записей сделано)
-    const written: number = await upsertMemoriesBatch(records);
+    const stats = await upsertChunks(docs);
 
     return NextResponse.json({
       ok: true,
-      ns, slot, owner, repo, ref,
+      ns, slot, owner, repo, ref: safeRef,
       totalFiles,
       windowStart: cur,
       windowEnd: cur + pageFiles.length - 1,
       pageFiles: pageFiles.length,
-      chunks: chunksAll.length,
-      written,
+      chunks: totalChunks,
+      written: [], // можно заполнить ids при желании
+      inserted: stats.inserted,
+      updated: stats.updated,
       nextCursor,
       ms: Date.now() - started,
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, stage, error: e?.message || String(e) }, { status: 500 });
   }
+}
+
+export function GET() {
+  return NextResponse.json({ error: "Method Not Allowed" }, { status: 405 });
 }
