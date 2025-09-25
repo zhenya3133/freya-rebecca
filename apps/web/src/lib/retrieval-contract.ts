@@ -29,15 +29,12 @@ export type RetrieveItem = {
   id: string;
   url: string | null;
   title: string | null;
-  snippet: string | null;
-  score: number;            // итоговый (после пересчётов)
-  similarity: number;       // сырая косинусная близость
-  published_at: string | null;
-  source_type: string | null;
-  kind: string | null;
+  content: string | null;
+  score: number;
 };
 
 export type RetrieveResponse = {
   items: RetrieveItem[];
+  filterInfo: { allowMatched: number; denySkipped: number };
   debugVersion: "rc-v1";
 };

@@ -28,7 +28,7 @@ type Row = {
   slot: string;
   url: string | null;
   title: string | null;
-  snippet: string | null;
+  content: string | null;
   published_at: string | null;
   source_type: string | null;
   kind: string | null;
@@ -90,7 +90,7 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
   // строим основной текст запроса с «дыркой» под домен
   const base = `
     SELECT
-      id, ns, slot, url, title, snippet,
+      id, ns, slot, url, title, content,
       COALESCE(to_char(published_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), NULL) AS published_at,
       source_type, kind, metadata,
       (1 - (embedding <=> $VEC::vector)) AS sim
@@ -185,7 +185,7 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
   // теперь окончательный текст
   const finalSQL = `
     SELECT
-      id, ns, slot, url, title, snippet,
+      id, ns, slot, url, title, content,
       COALESCE(to_char(published_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), NULL) AS published_at,
       source_type, kind, metadata,
       (1 - (embedding <=> $${next}::vector)) AS sim
@@ -228,16 +228,10 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
     const score = ALPHA * r.sim + BETA * timeDecay(r.published_at);
     return {
       id: r.id,
-      ns: r.ns,
-      slot: r.slot,
       url: r.url,
       title: r.title,
-      snippet: r.snippet,
+      content: r.content,
       score,
-      publishedAt: r.published_at,
-      sourceType: r.source_type,
-      kind: r.kind,
-      metadata: r.metadata ?? {},
     };
   });
 
@@ -246,13 +240,8 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
     .slice(0, topK);
 
   const filterInfo = {
-    nsMode: req.nsMode,
-    candidateK,
-    minSimilarity: req.minSimilarity,
-    droppedAfterSimilarity: rows.length - afterSim.length,
-    droppedAfterDomain: afterSim.length - afterDomain.length,
-    domainAllow: req.domainFilter?.allow ?? [],
-    domainDeny: req.domainFilter?.deny ?? [],
+    allowMatched: afterDomain.length,
+    denySkipped: rows.length - afterDomain.length,
   };
 
   return { items, filterInfo, debugVersion: "rc-v1" };

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { embedMany } from "@/lib/embeddings";
 import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
+import { retryFetch } from "@/lib/retryFetch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,7 +34,7 @@ async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
     const { readFile } = await import("node:fs/promises");
     return readFile(url.slice("file://".length));
   }
-  const r = await fetch(url, { redirect: "follow" });
+  const r = await retryFetch(url, { redirect: "follow" });
   if (!r.ok) throw new Error(`fetch failed: ${r.status} ${r.statusText}`);
   const reader = r.body?.getReader();
   if (!reader) return Buffer.from(await r.arrayBuffer());
@@ -54,7 +55,7 @@ async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
 async function fetchPdfViaJina(url: string): Promise<string> {
   const enc = encodeURI(url).replace(/^https?:\/\//, "");
   const jina = `https://r.jina.ai/https://${enc}`;
-  const r = await fetch(jina, { redirect: "follow" });
+  const r = await retryFetch(jina, { redirect: "follow" });
   if (!r.ok) throw new Error(`Jina ${r.status} ${r.statusText}`);
   return await r.text();
 }

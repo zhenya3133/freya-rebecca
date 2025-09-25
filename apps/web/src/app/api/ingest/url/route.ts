@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
 import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
+import { retryFetch } from "@/lib/retryFetch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +25,7 @@ const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
 async function fetchTextOrPdf(url: string): Promise<{ type: "text" | "pdf"; text?: string; buf?: Buffer; ctype?: string }> {
-  const r = await fetch(url, { redirect: "follow", headers: { "User-Agent": UA, Accept: "*/*" } });
+  const r = await retryFetch(url, { redirect: "follow", headers: { "User-Agent": UA, Accept: "*/*" } });
   if (!r.ok) throw new Error(`GET ${url} -> ${r.status} ${r.statusText}`);
   const ct = r.headers.get("content-type") || "";
   if (ct.includes("application/pdf") || url.toLowerCase().endsWith(".pdf")) {
@@ -134,7 +135,7 @@ export async function POST(req: Request) {
     for (const p of pdfQueue) {
       pdfDelegated++;
       try {
-        const resp = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/ingest/pdf`, {
+        const resp = await retryFetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/ingest/pdf`, {
           method: "POST",
           headers: {
             "content-type": "application/json",

@@ -1,31 +1,29 @@
 // apps/web/src/lib/ingest_upsert.ts
 import { pool } from "@/lib/pg";
 import { createHash } from "crypto";
-import { embedQuery } from "@/lib/embeddings"; // одна и та же модель для query/passage — ок для cosine
+import { embedQuery } from "@/lib/embeddings";
 
 export type IngestChunk = {
   content: string;
-  chunk_no: number;                  // 0..N-1 (стабильная нумерация)
+  chunk_no: number;
   metadata?: Record<string, any>;
 };
 
 export type IngestDoc = {
-  ns: string;                        // например: "rebecca/army/refs"
+  ns: string;
   slot: "staging" | "prod";
-  source_id: string;                 // URL | file:<sha256> | gh:<owner>/<repo>@<ref>:<path>
+  source_id: string;
   url?: string | null;
   title?: string | null;
-  published_at?: string | null;      // ISO или null
-  source_type?: string | null;       // "url" | "pdf" | "github" | ...
-  kind?: string | null;              // "doc" | "section" | ...
+  published_at?: string | null;
+  source_type?: string | null;
+  kind?: string | null;
   chunks: IngestChunk[];
   doc_metadata?: Record<string, any>;
 };
 
-/** SHA-256 в hex от текста */
 const hashText = (t: string) => createHash("sha256").update(t).digest("hex");
 
-/** простая параллельная обёртка над embedQuery */
 async function embedMany(texts: string[], concurrency = 8): Promise<number[][]> {
   const out: number[][] = new Array(texts.length);
   let i = 0;
@@ -40,7 +38,6 @@ async function embedMany(texts: string[], concurrency = 8): Promise<number[][]> 
   return out;
 }
 
-/** минимальная нормализация строк */
 const sanitize = (s: unknown, max = 10_000): string | null => {
   if (typeof s !== "string") return null;
   const t = s.replace(/\u0000/g, "").trim();
@@ -48,13 +45,11 @@ const sanitize = (s: unknown, max = 10_000): string | null => {
   return t.length > max ? t.slice(0, max) : t;
 };
 
-/** быстрая проверка размерности векторной колонки */
-const EXPECTED_DIM = 1536; // держим в синхроне с schema: vector(1536)
+const EXPECTED_DIM = 1536;
 
 export async function upsertChunks(docs: IngestDoc[]) {
   if (!docs.length) return { inserted: 0, updated: 0, total: 0 };
 
-  // 0) валидация входа (раньше, чтобы падать до эмбеддингов)
   for (const d of docs) {
     if (!d.ns?.trim()) throw new Error("upsertChunks: ns is required");
     if (d.slot !== "staging" && d.slot !== "prod") {
@@ -66,7 +61,6 @@ export async function upsertChunks(docs: IngestDoc[]) {
     }
   }
 
-  // 1) готовим плоскую вставку: фильтруем пустые/очевидный мусор
   const flat: Array<{
     ns: string;
     slot: "staging" | "prod";
@@ -86,7 +80,6 @@ export async function upsertChunks(docs: IngestDoc[]) {
   for (const d of docs) {
     const commonMeta = d.doc_metadata || {};
     for (const ch of d.chunks) {
-      // чистим контент; отбрасываем совсем мелочь (< 5 символов после trim)
       const content = sanitize(ch.content, 50_000);
       if (!content || content.length < 5) continue;
 
@@ -111,10 +104,8 @@ export async function upsertChunks(docs: IngestDoc[]) {
 
   if (!flat.length) return { inserted: 0, updated: 0, total: 0 };
 
-  // 2) эмбеддинги (однотипная модель норм для cosine)
   const embeddings = await embedMany(flat.map(f => f.content));
 
-  // 3) контрольная проверка размерности (ловим рассинхрон с vector(N))
   if (embeddings.length !== flat.length) {
     throw new Error(`upsertChunks: embeddings count mismatch: got ${embeddings.length}, expected ${flat.length}`);
   }
@@ -131,37 +122,36 @@ export async function upsertChunks(docs: IngestDoc[]) {
 
     let inserted = 0, updated = 0;
 
-    // 4) батчевой UPSERT
     const BATCH = 500;
     for (let off = 0; off < flat.length; off += BATCH) {
       const slice = flat.slice(off, off + BATCH);
-      const vecs  = embeddings.slice(off, off + BATCH).map(v => `[${v.join(",")}]`);
+      const vecs  = embeddings.slice(off, off + BATCH);
 
-      // 13 параметров на строку (embedding как литерал ::vector — быстрее и проще, чем массив параметров)
       const rowsSql: string[] = [];
       const params: any[] = [];
       slice.forEach((r, i) => {
-        const base = i * 13;
+        const base = i * 14;
         rowsSql.push(`(
-          $${base + 1}::text,          -- ns
-          $${base + 2}::text,          -- slot
-          $${base + 3}::text,          -- content
-          ${vecs[i]}::vector,          -- embedding
-          $${base + 4}::text,          -- url
-          $${base + 5}::text,          -- title
-          $${base + 6}::text,          -- snippet
-          $${base + 7}::timestamptz,   -- published_at
-          $${base + 8}::text,          -- source_type
-          $${base + 9}::text,          -- kind
-          $${base +10}::jsonb,         -- metadata
-          $${base +11}::text,          -- content_hash
-          $${base +12}::text,          -- source_id
-          $${base +13}::int            -- chunk_no
+          $${base + 1}::text,
+          $${base + 2}::text,
+          $${base + 3}::text,
+          $${base + 4}::vector,
+          $${base + 5}::text,
+          $${base + 6}::text,
+          $${base + 7}::text,
+          $${base + 8}::timestamptz,
+          $${base + 9}::text,
+          $${base +10}::text,
+          $${base +11}::jsonb,
+          $${base +12}::text,
+          $${base +13}::text,
+          $${base +14}::int
         )`);
         params.push(
           r.ns,
           r.slot,
           r.content,
+          `[${vecs[i].join(",")}]`, // Pass embedding as a string representation of a vector
           r.url,
           r.title,
           r.snippet,
@@ -213,3 +203,5 @@ export async function upsertChunks(docs: IngestDoc[]) {
     client.release();
   }
 }
+
+
