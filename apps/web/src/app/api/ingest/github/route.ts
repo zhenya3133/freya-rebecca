@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { embedMany } from "@/lib/embeddings";
 import { upsertMemoriesBatch } from "@/lib/memories";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
+import { retryFetch } from "@/lib/retryFetch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,7 +53,7 @@ async function gh<T = any>(url: string) {
   };
   const tok = (process.env.GITHUB_TOKEN || "").trim();
   if (tok) headers["Authorization"] = `Bearer ${tok}`;
-  const res = await fetch(url, { headers, redirect: "follow" });
+  const res = await retryFetch(url, { headers, redirect: "follow" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`GitHub ${res.status} ${res.statusText}: ${text.slice(0, 300)}`);

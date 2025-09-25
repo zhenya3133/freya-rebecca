@@ -1,10 +1,8 @@
-// apps/web/src/app/api/ingest/pdf/route.ts
 import { NextResponse } from "next/server";
 import { embedMany } from "@/lib/embeddings";
-import { upsertMemoriesBatch } from "@/lib/memories";
+import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
-import fs from "node:fs/promises";
-import path from "node:path";
+import { retryFetch } from "@/lib/retryFetch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,9 +10,10 @@ export const dynamic = "force-dynamic";
 type Body = {
   ns: string;
   url: string;
-  slot?: string | null;
+  slot?: "staging" | "prod" | string | null;
   kind?: string | null;
   chunk?: { chars?: number; overlap?: number };
+  maxFileBytes?: number | null;
 };
 
 function assertAdmin(req: Request) {
@@ -24,81 +23,129 @@ function assertAdmin(req: Request) {
   if (need && got !== need) throw new Error("unauthorized");
 }
 
-async function fetchPdfAsBuffer(url: string): Promise<Buffer> {
-  // Локальный путь для отладки: url = file:///abs/path/to/file.pdf
-  if (url.startsWith("file://")) {
-    const p = url.replace("file://", "");
-    const abs = path.isAbsolute(p) ? p : path.join(process.cwd(), p);
-    return await fs.readFile(abs);
-  }
-
-  // HTTP(S)
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) {
-    throw new Error(`fetch failed: ${res.status} ${res.statusText}`);
-  }
-  const ab = await res.arrayBuffer();
-  return Buffer.from(ab);
+async function importPdfParse(): Promise<(buf: Buffer) => Promise<any>> {
+  const mod: any = await import("pdf-parse");
+  const pdfParse = mod?.default ?? mod;
+  return (buf: Buffer) => pdfParse(buf);
 }
 
-async function extractTextFromPdf(buf: Buffer): Promise<{ text: string; pages?: number }> {
-  // Импортируем напрямую lib-реализацию, минуя index.js с "debug mode"
-  const mod: any = await import("pdf-parse/lib/pdf-parse.js");
-  const pdfParse = mod?.default ?? mod; // совместимо с ESM/CJS
-  const out = await pdfParse(buf);
-  return { text: out.text || "", pages: out.numpages };
+async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
+  if (url.startsWith("file://")) {
+    const { readFile } = await import("node:fs/promises");
+    return readFile(url.slice("file://".length));
+  }
+  const r = await retryFetch(url, { redirect: "follow" });
+  if (!r.ok) throw new Error(`fetch failed: ${r.status} ${r.statusText}`);
+  const reader = r.body?.getReader();
+  if (!reader) return Buffer.from(await r.arrayBuffer());
+  const parts: Uint8Array[] = [];
+  let total = 0, limit = Number(maxBytes) || Infinity;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > limit) throw new Error(`response too large (${total} > ${limit})`);
+      parts.push(value);
+    }
+  }
+  return Buffer.concat(parts);
+}
+
+async function fetchPdfViaJina(url: string): Promise<string> {
+  const enc = encodeURI(url).replace(/^https?:\/\//, "");
+  const jina = `https://r.jina.ai/https://${enc}`;
+  const r = await retryFetch(jina, { redirect: "follow" });
+  if (!r.ok) throw new Error(`Jina ${r.status} ${r.statusText}`);
+  return await r.text();
 }
 
 export async function POST(req: Request) {
   const t0 = Date.now();
+  let stage: string = "init";
   try {
     assertAdmin(req);
-    const { ns, url, slot = "staging", kind = "pdf", chunk } = (await req.json()) as Body;
+    const body = (await req.json()) as Body;
+
+    const ns   = (body.ns || "").trim();
+    const url  = (body.url || "").trim();
+    const slot = ((body.slot || "staging") as "staging" | "prod");
+    const kind = (body.kind || "pdf");
+    const opts = normalizeChunkOpts(body.chunk);
+    const MAXB = Number.isFinite(Number(body.maxFileBytes)) ? Math.max(50_000, Number(body.maxFileBytes)) : undefined;
+
     if (!ns || !url) {
-      return NextResponse.json({ ok: false, error: "ns and url are required" }, { status: 400 });
+      return NextResponse.json({ ok: false, stage, error: "ns and url are required" }, { status: 400 });
+    }
+    if (!["staging","prod"].includes(slot)) {
+      return NextResponse.json({ ok: false, stage, error: "slot must be 'staging'|'prod'" }, { status: 400 });
     }
 
-    const buf = await fetchPdfAsBuffer(url);
-    const { text, pages } = await extractTextFromPdf(buf);
-    if (!text?.trim()) throw new Error("empty text extracted from PDF");
+    stage = "download";
+    let text = "";
+    let pages: number | undefined;
 
-    const opts = normalizeChunkOpts(chunk);
-    const chunks = chunkText(text, opts);
-    if (!chunks.length) throw new Error("no chunks produced");
+    try {
+      const buf = await fetchAsBuffer(url, MAXB);
+      const pdfParse = await importPdfParse();
+      stage = "pdf-parse";
+      const out = await pdfParse(buf);
+      text  = (out?.text || "").trim();
+      pages = out?.numpages;
+    } catch {
+      // сетевой fallback (alphaxiv и пр.)
+      stage = "fallback-jina";
+      text = (await fetchPdfViaJina(url)).trim();
+    }
 
-    const vectors = await embedMany(chunks);
+    if (!text) throw new Error("empty text extracted from PDF");
 
-    const records = chunks.map((content, i) => ({
-      kind: kind || "pdf",
+    stage = "chunk";
+    const parts = chunkText(text, opts);
+    if (!parts.length) throw new Error("no chunks produced");
+
+    stage = "db";
+    const doc: IngestDoc = {
       ns,
       slot,
-      content,
-      embedding: vectors[i],
-      metadata: {
+      source_id: url,
+      url,
+      title: null,
+      published_at: null,
+      source_type: "pdf",
+      kind,
+      doc_metadata: {
         source_type: "pdf",
         url,
-        page_count: pages,
-        chunk_index: i,
-        chunk_chars: content.length,
+        page_count: pages ?? null,
         chunk: opts,
+        chunk_total: parts.length,
       },
-    }));
+      chunks: parts.map((content, i) => ({
+        content,
+        chunk_no: i,
+        metadata: {
+          source_type: "pdf",
+          url,
+          page_count: pages ?? null,
+          chunk: opts,
+          chunk_chars: content.length,
+        },
+      })),
+    };
 
-    const { written, ids } = await upsertMemoriesBatch(records);
+    // upsert
+    await upsertChunks([doc]);
+
     return NextResponse.json({
-      ok: true,
-      ns,
-      slot,
-      url,
-      pages,
-      chunks: chunks.length,
-      written,
-      ids,
+      ok: true, ns, slot, url,
+      pages: pages ?? null,
+      chunks: parts.length,
       ms: Date.now() - t0,
     });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, stage: "extract", error: e?.message || String(e) },
+      { ok: false, stage, error: e?.message || String(e) },
       { status: 500 }
     );
   }

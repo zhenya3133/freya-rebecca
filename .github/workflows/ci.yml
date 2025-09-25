@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_ENV: production
+      # опц: если задашь в репозитории -> пробежит интеграционный блок
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      X_ADMIN_KEY: test_admin_key_123
+      RETRIEVE_ALPHA: "0.85"
+      RETRIEVE_BETA: "0.15"
+      RETRIEVE_T_HALF: "180"
+      RETRIEVE_PROBES: "10"
+      BASE: http://localhost:3000
+      NS: rebecca/army/refs
+      SLOT: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install deps (root & apps/web)
+        run: |
+          pnpm install --frozen-lockfile || pnpm install
+
+      # 1) типы + линт
+      - name: Typecheck
+        run: pnpm -w --filter ./apps/web tsc --noEmit
+
+      - name: ESLint
+        run: pnpm -w --filter ./apps/web eslint --max-warnings=0 .
+
+      # 2) shell scripts syntax
+      - name: Bash syntax
+        run: |
+          find apps/web/scripts -type f -name "*.sh" -print0 | xargs -0 -I{} bash -n "{}"
+
+      # 3) интеграционные: только если есть DATABASE_URL
+      - name: Build Next app
+        if: env.DATABASE_URL != ''
+        working-directory: apps/web
+        run: pnpm build
+
+      - name: Start Next app
+        if: env.DATABASE_URL != ''
+        working-directory: apps/web
+        run: |
+          pnpm start &>/tmp/next.log &
+          npx wait-on http://localhost:3000
+
+      - name: Contract test /api/retrieve
+        if: env.DATABASE_URL != ''
+        run: |
+          chmod +x apps/web/scripts/contract/test_retrieve.sh
+          apps/web/scripts/contract/test_retrieve.sh
+
+      # 4) отчёт логов в случае падения
+      - name: Print Next logs on failure
+        if: failure()
+        run: |
+          echo "==== NEXT LOG ===="
+          tail -n +1 /tmp/next.log || true
