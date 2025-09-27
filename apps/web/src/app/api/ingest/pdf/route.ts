@@ -1,7 +1,10 @@
+// apps/web/src/app/api/ingest/pdf/route.ts
 import { NextResponse } from "next/server";
-import { embedMany } from "@/lib/embeddings";
-import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
+import { assertAdmin } from "@/lib/admin";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
+import { upsertChunksWithTargets, type IngestDoc } from "@/lib/ingest_upsert";
+import { embedMany } from "@/lib/embeddings";
+import { pool } from "@/lib/pg";
 import { retryFetch } from "@/lib/retryFetch";
 
 export const runtime = "nodejs";
@@ -11,17 +14,16 @@ type Body = {
   ns: string;
   url: string;
   slot?: "staging" | "prod" | string | null;
-  kind?: string | null;
+  kind?: string | null;                 // "pdf" по умолчанию
   chunk?: { chars?: number; overlap?: number };
-  maxFileBytes?: number | null;
+  maxFileBytes?: number | null;         // лимит на размер PDF
+  dryRun?: boolean;                     // только посчитать чанки, без записи в БД
+  skipEmbeddings?: boolean;             // пропустить расчёт эмбеддингов
 };
 
-function assertAdmin(req: Request) {
-  const need = (process.env.X_ADMIN_KEY || "").trim();
-  if (!need) return;
-  const got = (req.headers.get("x-admin-key") || "").trim();
-  if (need && got !== need) throw new Error("unauthorized");
-}
+// user-agent пригодится для некоторых источников
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
 async function importPdfParse(): Promise<(buf: Buffer) => Promise<any>> {
   const mod: any = await import("pdf-parse");
@@ -34,8 +36,9 @@ async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
     const { readFile } = await import("node:fs/promises");
     return readFile(url.slice("file://".length));
   }
-  const r = await retryFetch(url, { redirect: "follow" });
+  const r = await retryFetch(url, { redirect: "follow", headers: { "User-Agent": UA, Accept: "application/pdf,*/*" } });
   if (!r.ok) throw new Error(`fetch failed: ${r.status} ${r.statusText}`);
+  // если тело доступно стримом — читаем с лимитом
   const reader = r.body?.getReader();
   if (!reader) return Buffer.from(await r.arrayBuffer());
   const parts: Uint8Array[] = [];
@@ -52,12 +55,17 @@ async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
   return Buffer.concat(parts);
 }
 
+// На случай, если pdf-parse не справился или источник капризный — Jina рендер
 async function fetchPdfViaJina(url: string): Promise<string> {
   const enc = encodeURI(url).replace(/^https?:\/\//, "");
   const jina = `https://r.jina.ai/https://${enc}`;
-  const r = await retryFetch(jina, { redirect: "follow" });
+  const r = await retryFetch(jina, { redirect: "follow", headers: { "User-Agent": UA } });
   if (!r.ok) throw new Error(`Jina ${r.status} ${r.statusText}`);
   return await r.text();
+}
+
+function toVectorLiteral(vec: number[]): string {
+  return `[${vec.join(",")}]`;
 }
 
 export async function POST(req: Request) {
@@ -73,6 +81,8 @@ export async function POST(req: Request) {
     const kind = (body.kind || "pdf");
     const opts = normalizeChunkOpts(body.chunk);
     const MAXB = Number.isFinite(Number(body.maxFileBytes)) ? Math.max(50_000, Number(body.maxFileBytes)) : undefined;
+    const dryRun = !!body.dryRun;
+    const skipEmb = !!body.skipEmbeddings;
 
     if (!ns || !url) {
       return NextResponse.json({ ok: false, stage, error: "ns and url are required" }, { status: 400 });
@@ -90,25 +100,40 @@ export async function POST(req: Request) {
       const pdfParse = await importPdfParse();
       stage = "pdf-parse";
       const out = await pdfParse(buf);
-      text  = (out?.text || "").trim();
+      text  = (out?.text || "").replace(/\s+/g, " ").trim();
       pages = out?.numpages;
     } catch {
-      // сетевой fallback (alphaxiv и пр.)
       stage = "fallback-jina";
-      text = (await fetchPdfViaJina(url)).trim();
+      text = (await fetchPdfViaJina(url)).replace(/\s+/g, " ").trim();
     }
 
-    if (!text) throw new Error("empty text extracted from PDF");
+    if (!text) {
+      return NextResponse.json({
+        ok: true, ns, slot, url, dryRun,
+        pages: pages ?? null,
+        textChunks: 0, textInserted: 0, textUpdated: 0, unchanged: 0, embedWritten: 0,
+        ms: Date.now() - t0,
+      });
+    }
 
     stage = "chunk";
     const parts = chunkText(text, opts);
-    if (!parts.length) throw new Error("no chunks produced");
+    const textChunks = parts.length;
 
-    stage = "db";
+    if (dryRun) {
+      return NextResponse.json({
+        ok: true, ns, slot, url, dryRun: true,
+        pages: pages ?? null,
+        textChunks, textInserted: 0, textUpdated: 0, unchanged: 0, embedWritten: 0,
+        ms: Date.now() - t0,
+      });
+    }
+
+    stage = "db-upsert";
     const doc: IngestDoc = {
       ns,
       slot,
-      source_id: url,
+      source_id: url,              // единая политика: source_id = URL
       url,
       title: null,
       published_at: null,
@@ -134,19 +159,35 @@ export async function POST(req: Request) {
       })),
     };
 
-    // upsert
-    await upsertChunks([doc]);
+    const { inserted, updated, unchanged, targets } = await upsertChunksWithTargets([doc]);
+
+    stage = "embeddings";
+    let embedWritten = 0;
+    if (!skipEmb && targets.length) {
+      const contents = targets.map(t => t.content);
+      const vectors  = await embedMany(contents); // проверяет EMBED_DIMS=1536
+      for (let i = 0; i < targets.length; i++) {
+        const id  = targets[i].id;
+        const lit = toVectorLiteral(vectors[i]);
+        await pool.query(`UPDATE chunks SET embedding = $1::vector, updated_at = NOW() WHERE id = $2`, [lit, id]);
+        embedWritten += 1;
+      }
+    }
 
     return NextResponse.json({
-      ok: true, ns, slot, url,
+      ok: true, ns, slot, url, dryRun: false,
       pages: pages ?? null,
-      chunks: parts.length,
+      textChunks, textInserted: inserted, textUpdated: updated, unchanged, embedWritten,
       ms: Date.now() - t0,
     });
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, stage, error: e?.message || String(e) },
-      { status: 500 }
+      { status: e?.message === "unauthorized" ? 401 : 500 }
     );
   }
+}
+
+export function GET() {
+  return NextResponse.json({ error: "Method Not Allowed" }, { status: 405 });
 }

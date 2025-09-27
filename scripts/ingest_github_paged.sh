@@ -1,3 +1,4 @@
+# scripts/ingest_github_paged.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -12,19 +13,32 @@ NS="${3:-rebecca/army/refs}"
 SLOT="${4:-staging}"
 REF="${5:-main}"
 LIMIT="${6:-250}"
-INCLUDE_EXT_JSON="${7:-[".md",".mdx",".py",".ipynb",".txt"]}"
+
+# Безопасный дефолт JSON-массива расширений (должен быть валидным JSON!)
+DEFAULT_INCLUDE='[".md",".mdx",".py",".ipynb",".txt"]'
+INCLUDE_EXT_JSON="${7:-$DEFAULT_INCLUDE}"
 
 APP=~/projects/freya-rebecca/apps/web
-BASE=http://localhost:3000
-ADM="x-admin-key: $(grep -E '^X_ADMIN_KEY=' "$APP/.env.local" | cut -d= -f2-)"
+BASE="${BASE:-http://localhost:3000}"
 
-# checkpoint для продолжения с места остановки
+# Заголовок авторизации: берём X_ADMIN_KEY из .env.local, если ADMIN_KEY не задан снаружи
+if [[ -z "${ADMIN_KEY:-}" ]]; then
+  if [[ -f "$APP/.env.local" ]]; then
+    XAK="$(grep -E '^X_ADMIN_KEY=' "$APP/.env.local" | cut -d= -f2- || true)"
+    ADMIN_KEY="${XAK:-}"
+  else
+    ADMIN_KEY=""
+  fi
+fi
+ADM="x-admin-key: ${ADMIN_KEY}"
+
+# checkpoint для возобновления
 CKPT_DIR="$APP/.ingest_checkpoints"
 mkdir -p "$CKPT_DIR"
 CKPT="$CKPT_DIR/${OWNER}_${REPO}_${REF}.cursor"
 
 if [[ -f "$CKPT" ]]; then
-  CURSOR=$(cat "$CKPT")
+  CURSOR="$(cat "$CKPT")"
 else
   CURSOR=0
 fi
@@ -34,10 +48,11 @@ TOTAL=""
 PAGE=0
 
 while true; do
+  # Формируем корректное JSON-тело. includeExt должен быть JSON-массивом!
   REQ=$(jq -n \
     --arg ns "$NS" --arg slot "$SLOT" \
     --arg owner "$OWNER" --arg repo "$REPO" --arg ref "$REF" \
-    --argjson cursor $CURSOR --argjson limit $LIMIT \
+    --argjson cursor "$CURSOR" --argjson limit "$LIMIT" \
     --argjson includeExt "$INCLUDE_EXT_JSON" \
     '{ns:$ns,slot:$slot,owner:$owner,repo:$repo,ref:$ref,includeExt:$includeExt,cursor:$cursor,limit:$limit}')
 
@@ -56,13 +71,18 @@ while true; do
   WINDOW_START=$(echo "$RESP" | jq -r '.windowStart')
   WINDOW_END=$(echo "$RESP" | jq -r '.windowEnd')
   PAGE_FILES=$(echo "$RESP" | jq -r '.pageFiles')
-  CHUNKS=$(echo "$RESP" | jq -r '.chunks')
-  WRITTEN=$(echo "$RESP" | jq -r '.written')
+  CHUNKS=$(echo "$RESP" | jq -r '.chunks // 0')
+
+  # НОВОЕ: берём inserted/updated/unchanged вместо прежнего written
+  INSERTED=$(echo "$RESP" | jq -r '.inserted // 0')
+  UPDATED=$(echo "$RESP" | jq -r '.updated // 0')
+  UNCHANGED=$(echo "$RESP" | jq -r '.unchanged // 0')
+
   MS=$(echo "$RESP" | jq -r '.ms')
   NEXT=$(echo "$RESP" | jq -r '.nextCursor')
 
   PAGE=$((PAGE+1))
-  echo "page #$PAGE files [$WINDOW_START..$WINDOW_END] pageFiles=$PAGE_FILES chunks=$CHUNKS written=$WRITTEN time=${MS}ms"
+  echo "page #$PAGE files [$WINDOW_START..$WINDOW_END] pageFiles=$PAGE_FILES chunks=$CHUNKS ins=$INSERTED upd=$UPDATED same=$UNCHANGED time=${MS}ms"
 
   if [[ "$NEXT" != "null" && -n "$NEXT" ]]; then
     echo -n "$NEXT" > "$CKPT"
