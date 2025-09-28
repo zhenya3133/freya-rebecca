@@ -16,20 +16,23 @@ mkdir -p "$IN_DIR" "$OUT_DIR"
 
 # ==== deps check ====
 need() { command -v "$1" >/dev/null 2>&1 || { echo "need $1"; exit 1; }; }
-need pandoc; need catdoc; need jq; need python3; need curl
+need pandoc; need catdoc; need jq; need python3; need curl; need pdftotext
 
 # ==== tmp ====
 TMP_DIR=/tmp/rebecca_ingest
 TXT_DIR="$TMP_DIR/txt"
 rm -rf "$TMP_DIR"; mkdir -p "$TXT_DIR"
 
-# ==== convert .docx/.doc -> .txt ====
-find "$IN_DIR" -maxdepth 1 -type f \( -iname '*.docx' -o -iname '*.doc' \) | while read -r f; do
+# ==== convert .docx/.doc/.pdf -> .txt ====
+find "$IN_DIR" -maxdepth 1 -type f \( -iname '*.docx' -o -iname '*.doc' -o -iname '*.pdf' \) | while read -r f; do
   bn="$(basename "$f")"; base="${bn%.*}"
   if echo "$bn" | grep -qi '\.docx$'; then
     pandoc -f docx -t plain "$f" -o "$TXT_DIR/$base.txt"
-  else
+  elif echo "$bn" | grep -qi '\.doc$'; then
     catdoc "$f" > "$TXT_DIR/$base.txt" || true
+  else
+    pdftotext -layout "$f" "$TXT_DIR/$base.txt" || true
+    [ -s "$TXT_DIR/$base.txt" ] || rm -f "$TXT_DIR/$base.txt"
   fi
 done
 
@@ -74,13 +77,22 @@ for fn in sorted(os.listdir(TXT_DIR)):
 print(json.dumps(items, ensure_ascii=False))
 PY
 
+
+# ---- auth self-check (dryRun) ----
+echo "[auth-check] Using X_ADMIN_KEY (len=${#X_ADMIN_KEY})"
+curl -sS -X POST "$BASE/api/ingest/seed" \
+  -H "content-type: application/json" \
+  -H "x-admin-key: ${X_ADMIN_KEY}" \
+  --data-binary '{"ns":"'"$NS"'","slot":"'"$SLOT"'","items":[{"source_id":"text:auth-selfcheck","url":null,"title":"Auth self-check","source_type":"text","kind":"text","doc_metadata":{},"chunks":[{"chunk_no":0,"content":"auth check chunk > 32 chars"}]}],"minChars":32,"dryRun":true}' \
+| jq '{ok,dryRun,error}'
+
 # ==== payload -> seed ====
 jq -n --arg ns "$NS" --arg slot "$SLOT" --slurpfile items /tmp/items.json \
 '{ ns:$ns, slot:$slot, items:$items[0], minChars:32, dryRun:false }' > /tmp/seed_batch.json
 
 curl -sS -X POST "$BASE/api/ingest/seed" \
   -H "content-type: application/json" \
-  -H "x-admin-key: '"$X_ADMIN_KEY"'" \
+  -H "x-admin-key: ${X_ADMIN_KEY}" \
   --data-binary @/tmp/seed_batch.json \
 | tee "$OUT_DIR/seed_result.json" \
 | jq '{ok,textChunks,textInserted,textUpdated,unchanged,targetsCount,ms,error}'
