@@ -24,7 +24,7 @@ type Body = {
   cursor?: number | null;       // смещение
   limit?: number | null;        // кол-во файлов на страницу (<= 250)
 
-  dryRun?: boolean | null;      // только план без записи
+  dryRun?: boolean | null;         // только план без записи
   skipEmbeddings?: boolean | null; // не считать эмбеддинги (для последующего backfill)
 
   chunk?: { chars?: number; overlap?: number };
@@ -38,6 +38,11 @@ const UA =
 const MAX_LIMIT_FILES  = 250;
 const MAX_FILE_BYTES   = 1_000_000;
 const MAX_TOTAL_CHUNKS = 3000;
+
+// Параллелизм и батчи — можно крутить под свой кластер
+const FETCH_CONCURRENCY = Number(process.env.INGEST_FETCH_CONCURRENCY || 6);   // параллельных fetch к GitHub
+const EMBED_BATCH       = Number(process.env.INGEST_EMBED_BATCH || 128);       // документов на один вызов embedMany
+const BACKFILL_LIMIT    = Number(process.env.INGEST_BACKFILL_LIMIT || 5000);   // лимит на backfill NULL-эмбеддингов/страница
 
 async function gh<T = any>(url: string) {
   const headers: Record<string, string> = {
@@ -107,6 +112,36 @@ function ipynbToText(nb: any): string {
   }
 }
 
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  if (size <= 0) return [arr];
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function mapWithConcurrency<I, O>(
+  items: I[],
+  limit: number,
+  fn: (item: I, index: number) => Promise<O>
+): Promise<O[]> {
+  if (limit <= 1) {
+    const out: O[] = [];
+    for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
+    return out;
+  }
+  const results: O[] = new Array(items.length) as any;
+  let i = 0;
+  const runners = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) break;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 export async function POST(req: Request) {
   const t0 = Date.now();
   let stage = "init";
@@ -146,6 +181,12 @@ export async function POST(req: Request) {
     const tree = await gh<{ tree: { path: string; type: string; sha: string }[] }>(
       `${GH}/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`
     );
+
+    // карта blobSha по пути
+    const blobShaByPath = new Map<string,string>();
+    for (const t of tree.tree) {
+      if (t.type === "blob") blobShaByPath.set(t.path, t.sha);
+    }
 
     const allowByExt = (name: string) => {
       const e = extOf(name);
@@ -197,120 +238,215 @@ export async function POST(req: Request) {
       });
     }
 
-    // 3) fetch + chunk (с ограничениями)
+    // 3) fetch + chunk (с ограничениями) + SKIP-FETCH + ПАРАЛЛЕЛИЗМ
     stage = "fetch+chunk";
     const docs: IngestDoc[] = [];
-    let totalChunks = 0;
+    let producedChunks = 0;
 
-    for (const p of pageFiles) {
-      // метаданные (размер)
-      const meta = await gh<{ size?: number; path: string }>(
-        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${usedRef}`
-      );
-      if ((meta as any)?.size && (meta as any).size > MAX_FILE_BYTES) continue;
+    const { pool } = await import("@/lib/pg");
+    const client = await pool.connect();
 
-      const raw = await gh<{ content: string; encoding: string; path: string; size?: number }>(
-        `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${usedRef}`
-      );
+    // sourceIds всей страницы — понадобятся для бэкофилла эмбеддингов даже при skip-fetch
+    const sourceIdsPage: string[] = pageFiles.map((p) => `github:${owner}/${repo}@${usedRef}:${p}`);
 
-      let text = "";
-      if (raw.encoding === "base64") {
-        const buf = Buffer.from(raw.content, "base64").toString("utf8");
-        if (extOf(raw.path) === ".ipynb") {
-          try { text = ipynbToText(JSON.parse(buf)); } catch { text = ""; }
-        } else {
-          text = buf;
+    try {
+      // Обрабатываем файлы параллельно с лимитом FETCH_CONCURRENCY
+      const perFile = await mapWithConcurrency(pageFiles, FETCH_CONCURRENCY, async (p) => {
+        const blobSha = blobShaByPath.get(p) || null;
+
+        // если в БД уже есть чанки с таким же blob_sha — пропускаем скачивание
+        if (blobSha) {
+          const check = await client.query<{ exists: boolean }>(
+            `
+            SELECT EXISTS (
+              SELECT 1
+              FROM chunks
+              WHERE source_id = $1
+                AND (metadata->>'blob_sha') = $2
+              LIMIT 1
+            ) AS exists
+            `,
+            [`github:${owner}/${repo}@${usedRef}:${p}`, blobSha]
+          );
+          if (check.rows[0]?.exists) {
+            return { doc: null as IngestDoc | null, chunks: 0 };
+          }
         }
-      }
-      text = (text || "").trim();
-      if (!text) continue;
 
-      const parts = chunkText(text, opts);
-      if (!parts.length) continue;
+        // метаданные (размер)
+        const meta = await gh<{ size?: number; path: string }>(
+          `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${usedRef}`
+        );
+        if ((meta as any)?.size && (meta as any).size > MAX_FILE_BYTES) {
+          return { doc: null, chunks: 0 };
+        }
 
-      const sourceUrl = `https://github.com/${owner}/${repo}/blob/${usedRef}/${raw.path}`;
-      const sourceId  = `github:${owner}/${repo}@${usedRef}:${raw.path}`;
+        const raw = await gh<{ content: string; encoding: string; path: string; size?: number }>(
+          `${GH}/repos/${owner}/${repo}/contents/${encodeURIComponent(p)}?ref=${usedRef}`
+        );
 
-      const doc: IngestDoc = {
-        ns,
-        slot,
-        source_id: sourceId,
-        url: sourceUrl,
-        title: null,
-        published_at: null,
-        source_type: "github",
-        kind: kind || "github",
-        doc_metadata: {
+        let text = "";
+        if (raw.encoding === "base64") {
+          const buf = Buffer.from(raw.content, "base64").toString("utf8");
+          if (extOf(raw.path) === ".ipynb") {
+            try { text = ipynbToText(JSON.parse(buf)); } catch { text = ""; }
+          } else {
+            text = buf;
+          }
+        }
+        text = (text || "").trim();
+        if (!text) return { doc: null, chunks: 0 };
+
+        const parts = chunkText(text, opts);
+        if (!parts.length) return { doc: null, chunks: 0 };
+
+        const sourceUrl = `https://github.com/${owner}/${repo}/blob/${usedRef}/${raw.path}`;
+        const sourceId  = `github:${owner}/${repo}@${usedRef}:${raw.path}`;
+
+        const doc: IngestDoc = {
+          ns,
+          slot,
+          source_id: sourceId,
+          url: sourceUrl,
+          title: null,
+          published_at: null,
           source_type: "github",
-          owner, repo, ref: usedRef, path: raw.path,
-          chunk: opts,
-          chunk_total: parts.length,
-        },
-        chunks: parts.map((content, i) => ({
-          content,
-          chunk_no: i,
-          metadata: {
+          kind: kind || "github",
+          doc_metadata: {
             source_type: "github",
             owner, repo, ref: usedRef, path: raw.path,
+            blob_sha: blobSha || null,
             chunk: opts,
-            chunk_chars: content.length,
+            chunk_total: parts.length,
           },
-        })),
-      };
+          chunks: parts.map((content, i) => ({
+            content,
+            chunk_no: i,
+            metadata: {
+              source_type: "github",
+              owner, repo, ref: usedRef, path: raw.path,
+              blob_sha: blobSha || null,
+              chunk: opts,
+              chunk_chars: content.length,
+            },
+          })),
+        };
 
-      docs.push(doc);
-      totalChunks += parts.length;
-      if (totalChunks >= MAX_TOTAL_CHUNKS) break;
-    }
-
-    if (!docs.length) {
-      return NextResponse.json({
-        ok: true,
-        ns, slot, owner, repo, ref: usedRef,
-        totalFiles,
-        windowStart: cur,
-        windowEnd: cur + pageFiles.length - 1,
-        pageFiles: pageFiles.length,
-        textChunks: 0,
-        textInserted: 0,
-        textUpdated: 0,
-        unchanged: 0,
-        embedWritten: 0,
-        nextCursor,
-        ms: Date.now() - t0,
+        return { doc, chunks: parts.length };
       });
+
+      // Собираем результаты, ограничиваем по MAX_TOTAL_CHUNKS
+      for (const r of perFile) {
+        if (!r?.doc) continue;
+        if (producedChunks + r.chunks > MAX_TOTAL_CHUNKS) {
+          // обрежем doc до остатка
+          const rest = MAX_TOTAL_CHUNKS - producedChunks;
+          if (rest <= 0) break;
+          const slim: IngestDoc = {
+            ...r.doc,
+            doc_metadata: { ...(r.doc.doc_metadata || {}), chunk_total: rest },
+            chunks: r.doc.chunks.slice(0, rest),
+          };
+          docs.push(slim);
+          producedChunks += rest;
+          break;
+        } else {
+          docs.push(r.doc);
+          producedChunks += r.chunks;
+        }
+      }
+    } finally {
+      // client оставляем открытым до окончания эмбеддингов
     }
 
     // 4) upsert чанков с таргетами
     stage = "db-upsert";
-    const { inserted, updated, targets, unchanged } = await upsertChunksWithTargets(docs);
+    const { inserted, updated, targets, unchanged } = docs.length
+      ? await upsertChunksWithTargets(docs)
+      : { inserted: 0, updated: 0, targets: [] as {id: string, content: string}[], unchanged: 0 };
 
-    // 5) эмбеддинги только по target’ам (если не запретили)
+    // 5) эмбеддинги (включая бэкофилл для embedding IS NULL) + БАТЧИ + Пакетный UPDATE
     let embedWritten = 0;
-    if (!skipEmbeddings && targets.length) {
-      stage = "embed";
-      const vectors = await embedMany(targets.map(t => t.content));
-      stage = "db-embed";
-      // батчево: один UPDATE per id
-      // (простая петля; можно сделать bulk через UNNEST, но для простоты так)
-      const { pool } = await import("@/lib/pg");
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        for (let i = 0; i < targets.length; i++) {
-          const id = targets[i].id;
-          const v  = vectors[i];
-          await client.query(`UPDATE chunks SET embedding = $1, updated_at = NOW() WHERE id = $2`, [v, id]);
-          embedWritten += 1;
+    if (!skipEmbeddings) {
+      stage = "embed+backfill";
+
+      type TargetRow = { id: string; content: string };
+      const targetRows: TargetRow[] = [];
+
+      // (а) изменившиеся/новые
+      for (const t of targets) targetRows.push({ id: t.id, content: t.content });
+
+      // (б) бэкофилл: null-эмбеддинги по всем source_id страницы
+      if (sourceIdsPage.length) {
+        const r = await client.query<TargetRow>(
+          `
+          SELECT id, content
+          FROM chunks
+          WHERE embedding IS NULL
+            AND source_id = ANY($1)
+          LIMIT $2
+        `,
+          [sourceIdsPage, BACKFILL_LIMIT]
+        );
+        for (const row of r.rows) {
+          if (!targetRows.find((x) => x.id === row.id)) targetRows.push(row);
         }
-        await client.query("COMMIT");
-      } catch (e) {
-        await client.query("ROLLBACK");
-        throw e;
-      } finally {
-        client.release();
+      }
+
+      // Батчами считаем и пишем
+      const batches = chunkArray(targetRows, EMBED_BATCH);
+
+      for (const batch of batches) {
+        if (!batch.length) continue;
+
+        stage = "embed";
+        const vectorsRaw = await embedMany(batch.map((t) => t.content));
+
+        // → строка вида "[0.1,-0.2,...]" без пробелов
+        const toPgVector = (v: any): string => {
+          const arr: number[] = Array.isArray(v)
+            ? v.map((x) => Number(x))
+            : Array.isArray((v as any)?.embedding)
+            ? (v as any).embedding.map((x: any) => Number(x))
+            : [];
+          if (!arr.length) throw new Error("Empty embedding vector");
+          return `[${arr.join(",")}]`;
+        };
+
+        const ids: string[] = [];
+        const vecs: string[] = [];
+        for (let i = 0; i < batch.length; i++) {
+          ids.push(batch[i].id);
+          vecs.push(toPgVector((vectorsRaw as any)[i]));
+        }
+
+        // Пакетный апдейт одним запросом
+        stage = "db-embed";
+        await client.query("BEGIN");
+        try {
+          await client.query(
+            `
+            WITH data AS (
+              SELECT UNNEST($1::text[]) AS id, UNNEST($2::text[]) AS vec
+            )
+            UPDATE chunks c
+            SET embedding = data.vec::vector, updated_at = NOW()
+            FROM data
+            WHERE c.id = data.id
+            `,
+            [ids, vecs]
+          );
+          await client.query("COMMIT");
+          embedWritten += ids.length;
+        } catch (e) {
+          await client.query("ROLLBACK");
+          throw e;
+        }
       }
     }
+
+    // Закрываем подключение
+    client.release();
 
     return NextResponse.json({
       ok: true,
@@ -319,7 +455,7 @@ export async function POST(req: Request) {
       windowStart: cur,
       windowEnd: cur + pageFiles.length - 1,
       pageFiles: pageFiles.length,
-      textChunks: totalChunks,
+      textChunks: producedChunks,
       textInserted: inserted,
       textUpdated: updated,
       unchanged,

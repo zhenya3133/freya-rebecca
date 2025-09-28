@@ -1,7 +1,11 @@
+// apps/web/src/app/api/ingest/url/route.ts
 import { NextResponse } from "next/server";
 import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
-import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
+import { upsertChunksWithTargets, type IngestDoc } from "@/lib/ingest_upsert";
 import { retryFetch } from "@/lib/retryFetch";
+import { assertAdmin } from "@/lib/admin";
+import { embedMany } from "@/lib/embeddings";
+import { pool } from "@/lib/pg";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,17 +13,12 @@ export const dynamic = "force-dynamic";
 type Body = {
   ns: string;
   slot?: "staging" | "prod" | string | null;
-  kind?: string | null;                 // "url" по умолчанию
+  kind?: string | null;
   urls: string[];
   chunk?: { chars?: number; overlap?: number };
+  dryRun?: boolean;
+  skipEmbeddings?: boolean;
 };
-
-function assertAdmin(req: Request) {
-  const need = (process.env.X_ADMIN_KEY || "").trim();
-  if (!need) return;
-  const got = (req.headers.get("x-admin-key") || "").trim();
-  if (need && got !== need) throw new Error("unauthorized");
-}
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -35,7 +34,6 @@ async function fetchTextOrPdf(url: string): Promise<{ type: "text" | "pdf"; text
   return { type: "text", text: await r.text(), ctype: ct };
 }
 
-// очень простой «выколачиватель» текста из HTML (нам хватает)
 function htmlToText(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -45,11 +43,16 @@ function htmlToText(html: string): string {
     .trim();
 }
 
+function toVectorLiteral(vec: number[]): string {
+  return `[${vec.join(",")}]`;
+}
+
 export async function POST(req: Request) {
   const t0 = Date.now();
   let stage: string | null = null;
   try {
     assertAdmin(req);
+
     stage = "init";
     const body = (await req.json()) as Body;
 
@@ -58,6 +61,8 @@ export async function POST(req: Request) {
     const kind = (body.kind || "url");
     const urls = Array.isArray(body.urls) ? body.urls.filter(Boolean) : [];
     const opts = normalizeChunkOpts(body.chunk);
+    const dryRun = !!body.dryRun;
+    const skipEmb = !!body.skipEmbeddings;
 
     if (!ns || !urls.length) {
       return NextResponse.json({ ok: false, error: "ns and urls are required" }, { status: 400 });
@@ -69,8 +74,9 @@ export async function POST(req: Request) {
     let textInserted = 0;
     let textUpdated  = 0;
     let textChunks   = 0;
+    let embedWritten = 0;
+    let unchanged    = 0;
 
-    // соберём документы, а PDF — делегируем в /api/ingest/pdf
     const docs: IngestDoc[] = [];
     const pdfQueue: { url: string }[] = [];
 
@@ -78,72 +84,71 @@ export async function POST(req: Request) {
     for (const url of urls) {
       try {
         const res = await fetchTextOrPdf(url);
-        if (res.type === "pdf") {
-          pdfQueue.push({ url });
-          continue;
-        }
-        const txt = htmlToText(res.text || "");
-        if (!txt) continue;
+        if (res.type === "pdf") { pdfQueue.push({ url }); continue; }
+        const txt = htmlToText(res.text || ""); if (!txt) continue;
 
         const parts = chunkText(txt, opts);
         textChunks += parts.length;
 
         const doc: IngestDoc = {
-          ns,
-          slot,
-          source_id: url,              // единая политика: source_id = URL
-          url,
-          title: null,
-          published_at: null,
-          source_type: "url",
-          kind,
-          doc_metadata: {
-            source_type: "url",
-            url,
-            chunk: opts,
-            chunk_total: parts.length,
-          },
+          ns, slot,
+          source_id: url,
+          url, title: null, published_at: null,
+          source_type: "url", kind,
+          doc_metadata: { source_type: "url", url, chunk: opts, chunk_total: parts.length },
           chunks: parts.map((content, i) => ({
-            content,
-            chunk_no: i,
-            metadata: {
-              source_type: "url",
-              url,
-              chunk: opts,
-              chunk_chars: content.length,
-            },
+            content, chunk_no: i,
+            metadata: { source_type: "url", url, chunk: opts, chunk_chars: content.length },
           })),
         };
         docs.push(doc);
       } catch (e) {
-        // копим ошибки на сторону клиента
         console.warn("ingest/url: failed", url, String(e));
       }
     }
 
-    stage = "db";
-    if (docs.length) {
-      const r = await upsertChunks(docs);
-      textInserted += r.inserted;
-      textUpdated  += r.updated;
+    if (dryRun) {
+      return NextResponse.json({
+        ok: true, ns, slot, urls, dryRun: true,
+        pdfDelegated: 0, pdfStats: { chunks: 0, written: 0 },
+        textChunks, textInserted: 0, textUpdated: 0, unchanged: 0, embedWritten: 0,
+        ms: Date.now() - t0,
+      });
     }
 
-    // PDF делегируем (последовательно — чтобы не спамить)
+    stage = "db-upsert";
+    let targets: Array<{ id: string; content: string }> = [];
+    if (docs.length) {
+      const r = await upsertChunksWithTargets(docs);
+      textInserted += r.inserted;
+      textUpdated  += r.updated;
+      unchanged    += r.unchanged;
+      targets = r.targets;
+    }
+
+    stage = "embeddings";
+    if (!skipEmb && targets.length) {
+      const contents = targets.map(t => t.content);
+      const vectors  = await embedMany(contents); // проверит DIMS=1536
+      for (let i = 0; i < targets.length; i++) {
+        const id = targets[i].id;
+        const lit = toVectorLiteral(vectors[i]);
+        await pool.query(`UPDATE chunks SET embedding = $1::vector, updated_at = NOW() WHERE id = $2`, [lit, id]);
+        embedWritten += 1;
+      }
+    }
+
     stage = "delegate-pdf";
     let pdfDelegated = 0;
     let pdfStats = { chunks: 0, written: 0 };
     for (const p of pdfQueue) {
       pdfDelegated++;
       try {
-        const resp = await retryFetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/ingest/pdf`, {
+        const resp = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/ingest/pdf`, {
           method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-admin-key": req.headers.get("x-admin-key") || "",
-          },
+          headers: { "content-type": "application/json", "x-admin-key": req.headers.get("x-admin-key") || "" },
           body: JSON.stringify({ ns, slot, url: p.url, kind: "pdf", chunk: opts }),
         });
-        // мы не проваливаемся по ошибке; просто статистика
         const j = await resp.json().catch(() => ({}));
         if (j?.chunks) pdfStats.chunks += Number(j.chunks) || 0;
         if (j?.textInserted) pdfStats.written += Number(j.textInserted) || 0;
@@ -153,20 +158,15 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({
-      ok: true,
-      ns, slot, urls,
-      pdfDelegated,
-      pdfStats,
-      textChunks,
-      textInserted,
-      textUpdated,
-      failures: [],
+      ok: true, ns, slot, urls, dryRun: false, skipEmbeddings: skipEmb,
+      pdfDelegated, pdfStats,
+      textChunks, textInserted, textUpdated, unchanged, embedWritten,
       ms: Date.now() - t0,
     });
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, stage, error: e?.message || String(e) },
-      { status: 500 }
+      { status: e?.message === "unauthorized" ? 401 : 500 }
     );
   }
 }

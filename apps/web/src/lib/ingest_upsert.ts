@@ -1,13 +1,19 @@
 // apps/web/src/lib/ingest_upsert.ts
 import { pool } from "@/lib/pg";
-import crypto from "crypto";
+import { contentIdentityHash } from "@/lib/hash";
 
+/**
+ * Единица контента для вставки.
+ */
 export type IngestChunk = {
   content: string;
   chunk_no: number;
   metadata: Record<string, any>;
 };
 
+/**
+ * Документ-носитель чанков (единица инжеста).
+ */
 export type IngestDoc = {
   ns: string;
   slot: "staging" | "prod" | (string & {});
@@ -24,19 +30,19 @@ export type IngestDoc = {
 export type UpsertResult = { inserted: number; updated: number };
 export type UpsertTargetsResult = UpsertResult & {
   targets: Array<{ id: string; content: string }>;
-  unchanged: number; // НОВОЕ: сколько столкнулись, но контент не изменился
+  unchanged: number;
 };
 
-function sha1(text: string): string {
-  return crypto.createHash("sha1").update(text).digest("hex");
-}
-
+/** Короткий сниппет для предпросмотра */
 function makeSnippet(text: string, max = 480): string {
-  const s = text.replace(/\s+/g, " ").trim();
+  const s = String(text ?? "").replace(/\s+/g, " ").trim();
   return s.length <= max ? s : s.slice(0, max);
 }
 
-/** Прежний upsert без таргетов — оставляем для совместимости */
+/**
+ * Прежний upsert без таргетов — оставляем для совместимости.
+ * Хеш — по идентичности чанка + контенту (sha256(ns|slot|source_id|chunk_no|content)).
+ */
 export async function upsertChunks(docs: IngestDoc[]): Promise<UpsertResult> {
   if (!Array.isArray(docs) || docs.length === 0) return { inserted: 0, updated: 0 };
 
@@ -64,30 +70,58 @@ export async function upsertChunks(docs: IngestDoc[]): Promise<UpsertResult> {
         metadata     = EXCLUDED.metadata,
         content_hash = EXCLUDED.content_hash,
         updated_at   = NOW()
-      RETURNING xmax = 0 AS inserted
+      RETURNING (xmax = 0) AS inserted
     `;
 
     for (const d of docs) {
-      const ns = d.ns, slot = d.slot, docMeta = d.doc_metadata ?? {};
+      const ns = d.ns;
+      const slot = d.slot;
+      const docMeta = d.doc_metadata ?? {};
+
       for (const ch of d.chunks) {
-        const content = String(ch.content ?? ""); if (!content) continue;
+        const content = String(ch.content ?? "");
+        if (!content) continue;
+
         const rowMeta = { ...(ch.metadata ?? {}), doc: docMeta };
         const snippet = makeSnippet(content);
-        const hash = sha1(content);
+        const hash = contentIdentityHash({
+          ns,
+          slot,
+          source_id: d.source_id ?? null,
+          chunk_no: ch.chunk_no,
+          content,
+        });
 
-        const params = [ns, slot, content, d.url ?? null, d.title ?? null, snippet,
-                        d.published_at ?? null, d.source_type ?? null, d.kind ?? null,
-                        rowMeta, hash, d.source_id ?? null, ch.chunk_no];
+        const params = [
+          ns,
+          slot,
+          content,
+          d.url ?? null,
+          d.title ?? null,
+          snippet,
+          d.published_at ?? null,
+          d.source_type ?? null,
+          d.kind ?? null,
+          rowMeta,
+          hash,
+          d.source_id ?? null,
+          ch.chunk_no,
+        ];
 
         const res = await client.query<{ inserted: boolean }>(textInsert, params);
-        if (res.rows[0]?.inserted) inserted += 1; else updated += 1;
+        if (res.rows[0]?.inserted) inserted += 1;
+        else updated += 1;
       }
     }
+
     await client.query("COMMIT");
     return { inserted, updated };
   } catch (e) {
-    await client.query("ROLLBACK"); throw e;
-  } finally { client.release(); }
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -97,7 +131,9 @@ export async function upsertChunks(docs: IngestDoc[]): Promise<UpsertResult> {
  *  • Иначе INSERT ... ON CONFLICT ... DO UPDATE (только при смене hash) с RETURNING — для целей эмбеддинга.
  */
 export async function upsertChunksWithTargets(docs: IngestDoc[]): Promise<UpsertTargetsResult> {
-  if (!Array.isArray(docs) || docs.length === 0) return { inserted: 0, updated: 0, targets: [], unchanged: 0 };
+  if (!Array.isArray(docs) || docs.length === 0) {
+    return { inserted: 0, updated: 0, targets: [], unchanged: 0 };
+  }
 
   const client = await pool.connect();
   try {
@@ -133,39 +169,67 @@ export async function upsertChunksWithTargets(docs: IngestDoc[]): Promise<Upsert
           content_hash = EXCLUDED.content_hash,
           updated_at   = NOW()
         WHERE chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
-        RETURNING id, xmax = 0 AS inserted, content AS new_content
+        RETURNING id, (xmax = 0) AS inserted, content AS new_content
       )
       SELECT id, inserted, new_content FROM up
     `;
 
     for (const d of docs) {
-      const ns = d.ns, slot = d.slot, docMeta = d.doc_metadata ?? {};
+      const ns = d.ns;
+      const slot = d.slot;
+      const docMeta = d.doc_metadata ?? {};
 
       for (const ch of d.chunks) {
-        const content = String(ch.content ?? ""); if (!content) continue;
+        const content = String(ch.content ?? "");
+        if (!content) continue;
+
         const rowMeta = { ...(ch.metadata ?? {}), doc: docMeta };
         const snippet = makeSnippet(content);
-        const hash = sha1(content);
+        const hash = contentIdentityHash({
+          ns,
+          slot,
+          source_id: d.source_id ?? null,
+          chunk_no: ch.chunk_no,
+          content,
+        });
 
         // 1) Быстрый чек: есть ли запись и совпадает ли hash → unchanged
-        const existing = await client.query<{ id: string; content_hash: string }>(textSelectExisting, [
-          ns, slot, d.source_id ?? null, ch.chunk_no
-        ]);
+        const existing = await client.query<{ id: string; content_hash: string }>(
+          textSelectExisting,
+          [ns, slot, d.source_id ?? null, ch.chunk_no]
+        );
+
         if (existing.rows.length && existing.rows[0].content_hash === hash) {
           unchanged += 1;
           continue; // ничего не делаем
         }
 
-        // 2) Иначе — вставка/апдейт с возвратом целей
-        const params = [ns, slot, content, d.url ?? null, d.title ?? null, snippet,
-                        d.published_at ?? null, d.source_type ?? null, d.kind ?? null,
-                        rowMeta, hash, d.source_id ?? null, ch.chunk_no];
+        // 2) Иначе — вставка/апдейт с возвратом целей (для эмбеддингов)
+        const params = [
+          ns,
+          slot,
+          content,
+          d.url ?? null,
+          d.title ?? null,
+          snippet,
+          d.published_at ?? null,
+          d.source_type ?? null,
+          d.kind ?? null,
+          rowMeta,
+          hash,
+          d.source_id ?? null,
+          ch.chunk_no,
+        ];
 
-        const res = await client.query<{ id: string; inserted: boolean; new_content: string }>(textInsertReturn, params);
+        const res = await client.query<{
+          id: string;
+          inserted: boolean;
+          new_content: string;
+        }>(textInsertReturn, params);
 
-        // в rows — только новые либо реально обновлённые
         for (const row of res.rows) {
-          if (row.inserted) inserted += 1; else updated += 1;
+          if (row.inserted) inserted += 1;
+          else updated += 1;
           targets.push({ id: row.id, content: row.new_content });
         }
       }
@@ -174,6 +238,9 @@ export async function upsertChunksWithTargets(docs: IngestDoc[]): Promise<Upsert
     await client.query("COMMIT");
     return { inserted, updated, targets, unchanged };
   } catch (e) {
-    await client.query("ROLLBACK"); throw e;
-  } finally { client.release(); }
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }

@@ -1,0 +1,12 @@
+ apps/web/Dockerfile                                |  9 ++++
+ apps/web/retrieve_grep_output.txt                  |  9 ++++
+ .../migrations/G6_make_embedding_nullable.sql      |  2 +
+ apps/web/src/app/api/ingest/github/route.ts        |  3 +-
+ apps/web/src/app/api/ingest/pdf/route.ts           |  5 +-
+ apps/web/src/app/api/ingest/url/route.ts           |  5 +-
+ apps/web/src/lib/ingest_upsert.ts                  | 62 ++++++++++------------
+ apps/web/src/lib/retrieval-contract.ts             |  9 ++--
+ apps/web/src/lib/retriever_v2.ts                   | 23 +++-----
+ apps/web/src/lib/retryFetch.ts                     | 32 +++++++++++
+ apps/web/src/lib/sleep.ts                          |  5 ++
+ 11 files changed, 101 insertions(+), 63 deletions(-)
