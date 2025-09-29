@@ -1,0 +1,13 @@
+apps/web/src/app/api/ingest
+├── github
+│   └── route.ts
+├── pdf
+│   └── route.ts
+├── seed
+│   └── route.ts
+├── url
+│   └── route.ts
+└── youtube
+    └── route.ts
+
+6 directories, 5 files

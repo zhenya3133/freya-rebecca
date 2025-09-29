@@ -1,0 +1,438 @@
+From b9b57b0b83086aa6df8062dfd9e2115105fdee77 Mon Sep 17 00:00:00 2001
+From: Manus Agent <manus-agent@google.com>
+Date: Wed, 24 Sep 2025 23:22:20 -0400
+Subject: [PATCH 08/14] feat: Implement /api/retrieve endpoint compliance and
+ robustness features
+
+---
+ apps/web/Dockerfile                           |  9 +++
+ apps/web/retrieve_grep_output.txt             |  9 +++
+ .../migrations/G6_make_embedding_nullable.sql |  2 +
+ apps/web/src/app/api/ingest/github/route.ts   |  3 +-
+ apps/web/src/app/api/ingest/pdf/route.ts      |  5 +-
+ apps/web/src/app/api/ingest/url/route.ts      |  5 +-
+ apps/web/src/lib/ingest_upsert.ts             | 62 ++++++++-----------
+ apps/web/src/lib/retrieval-contract.ts        |  9 +--
+ apps/web/src/lib/retriever_v2.ts              | 23 ++-----
+ apps/web/src/lib/retryFetch.ts                | 32 ++++++++++
+ apps/web/src/lib/sleep.ts                     |  5 ++
+ 11 files changed, 101 insertions(+), 63 deletions(-)
+ create mode 100644 apps/web/Dockerfile
+ create mode 100644 apps/web/retrieve_grep_output.txt
+ create mode 100644 apps/web/scripts/migrations/G6_make_embedding_nullable.sql
+ create mode 100644 apps/web/src/lib/retryFetch.ts
+ create mode 100644 apps/web/src/lib/sleep.ts
+
+diff --git a/apps/web/Dockerfile b/apps/web/Dockerfile
+new file mode 100644
+index 0000000..24881f8
+--- /dev/null
++++ b/apps/web/Dockerfile
+@@ -0,0 +1,9 @@
++FROM node:20-alpine
++WORKDIR /app
++COPY package.json package.json
++COPY package-lock.json package-lock.json
++COPY apps/web/ ./apps/web/
++RUN npm install
++EXPOSE 3000
++CMD npm run dev --prefix apps/web
++
+diff --git a/apps/web/retrieve_grep_output.txt b/apps/web/retrieve_grep_output.txt
+new file mode 100644
+index 0000000..d848482
+--- /dev/null
++++ b/apps/web/retrieve_grep_output.txt
+@@ -0,0 +1,9 @@
++./docs/retrieve-api.md:# /api/retrieve — мини-README
++./scripts/contract/test_retrieve.sh:resp_valid="$(curl -sS -X POST "$BASE/api/retrieve" -H 'content-type: application/json' -d "$valid")" || fail "valid POST failed (curl)"
++./scripts/contract/test_retrieve.sh:resp_invalid="$(curl -sS -X POST "$BASE/api/retrieve" -H 'content-type: application/json' -d "$invalid" || true)"
++./scripts/contract/test_retrieve.sh:resp_domain="$(curl -sS -X POST "$BASE/api/retrieve" -H 'content-type: application/json' -d "$with_domain")" || fail "domain POST failed"
++./scripts/evals/run_eval.mjs:// Node >=18 (встроенный fetch). Читает JSONL кейсы, бьет /api/retrieve, считает hit@k и MRR.
++./scripts/evals/run_eval.mjs:// одно обращение к /api/retrieve
++./scripts/evals/run_eval.mjs:  const r = await fetch(`${BASE}/api/retrieve`, {
++./scripts/evals/run_eval.ts:  const res = await fetch(`${BASE}/api/retrieve`, {
++./src/app/api/retrieve/route.ts:// apps/web/src/app/api/retrieve/route.ts
+diff --git a/apps/web/scripts/migrations/G6_make_embedding_nullable.sql b/apps/web/scripts/migrations/G6_make_embedding_nullable.sql
+new file mode 100644
+index 0000000..255b7ba
+--- /dev/null
++++ b/apps/web/scripts/migrations/G6_make_embedding_nullable.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE chunks ALTER COLUMN embedding DROP NOT NULL;
++
+diff --git a/apps/web/src/app/api/ingest/github/route.ts b/apps/web/src/app/api/ingest/github/route.ts
+index a4744df..05a2898 100644
+--- a/apps/web/src/app/api/ingest/github/route.ts
++++ b/apps/web/src/app/api/ingest/github/route.ts
+@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
+ import { embedMany } from "@/lib/embeddings";
+ import { upsertMemoriesBatch } from "@/lib/memories";
+ import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
++import { retryFetch } from "@/lib/retryFetch";
+ 
+ export const runtime = "nodejs";
+ export const dynamic = "force-dynamic";
+@@ -52,7 +53,7 @@ async function gh<T = any>(url: string) {
+   };
+   const tok = (process.env.GITHUB_TOKEN || "").trim();
+   if (tok) headers["Authorization"] = `Bearer ${tok}`;
+-  const res = await fetch(url, { headers, redirect: "follow" });
++  const res = await retryFetch(url, { headers, redirect: "follow" });
+   if (!res.ok) {
+     const text = await res.text().catch(() => "");
+     throw new Error(`GitHub ${res.status} ${res.statusText}: ${text.slice(0, 300)}`);
+diff --git a/apps/web/src/app/api/ingest/pdf/route.ts b/apps/web/src/app/api/ingest/pdf/route.ts
+index 4390577..905d9da 100644
+--- a/apps/web/src/app/api/ingest/pdf/route.ts
++++ b/apps/web/src/app/api/ingest/pdf/route.ts
+@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
+ import { embedMany } from "@/lib/embeddings";
+ import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
+ import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
++import { retryFetch } from "@/lib/retryFetch";
+ 
+ export const runtime = "nodejs";
+ export const dynamic = "force-dynamic";
+@@ -33,7 +34,7 @@ async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
+     const { readFile } = await import("node:fs/promises");
+     return readFile(url.slice("file://".length));
+   }
+-  const r = await fetch(url, { redirect: "follow" });
++  const r = await retryFetch(url, { redirect: "follow" });
+   if (!r.ok) throw new Error(`fetch failed: ${r.status} ${r.statusText}`);
+   const reader = r.body?.getReader();
+   if (!reader) return Buffer.from(await r.arrayBuffer());
+@@ -54,7 +55,7 @@ async function fetchAsBuffer(url: string, maxBytes?: number): Promise<Buffer> {
+ async function fetchPdfViaJina(url: string): Promise<string> {
+   const enc = encodeURI(url).replace(/^https?:\/\//, "");
+   const jina = `https://r.jina.ai/https://${enc}`;
+-  const r = await fetch(jina, { redirect: "follow" });
++  const r = await retryFetch(jina, { redirect: "follow" });
+   if (!r.ok) throw new Error(`Jina ${r.status} ${r.statusText}`);
+   return await r.text();
+ }
+diff --git a/apps/web/src/app/api/ingest/url/route.ts b/apps/web/src/app/api/ingest/url/route.ts
+index aa599ea..fb809a8 100644
+--- a/apps/web/src/app/api/ingest/url/route.ts
++++ b/apps/web/src/app/api/ingest/url/route.ts
+@@ -1,6 +1,7 @@
+ import { NextResponse } from "next/server";
+ import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
+ import { upsertChunks, type IngestDoc } from "@/lib/ingest_upsert";
++import { retryFetch } from "@/lib/retryFetch";
+ 
+ export const runtime = "nodejs";
+ export const dynamic = "force-dynamic";
+@@ -24,7 +25,7 @@ const UA =
+   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+ 
+ async function fetchTextOrPdf(url: string): Promise<{ type: "text" | "pdf"; text?: string; buf?: Buffer; ctype?: string }> {
+-  const r = await fetch(url, { redirect: "follow", headers: { "User-Agent": UA, Accept: "*/*" } });
++  const r = await retryFetch(url, { redirect: "follow", headers: { "User-Agent": UA, Accept: "*/*" } });
+   if (!r.ok) throw new Error(`GET ${url} -> ${r.status} ${r.statusText}`);
+   const ct = r.headers.get("content-type") || "";
+   if (ct.includes("application/pdf") || url.toLowerCase().endsWith(".pdf")) {
+@@ -134,7 +135,7 @@ export async function POST(req: Request) {
+     for (const p of pdfQueue) {
+       pdfDelegated++;
+       try {
+-        const resp = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/ingest/pdf`, {
++        const resp = await retryFetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/ingest/pdf`, {
+           method: "POST",
+           headers: {
+             "content-type": "application/json",
+diff --git a/apps/web/src/lib/ingest_upsert.ts b/apps/web/src/lib/ingest_upsert.ts
+index 7948caf..dd56aa6 100644
+--- a/apps/web/src/lib/ingest_upsert.ts
++++ b/apps/web/src/lib/ingest_upsert.ts
+@@ -1,31 +1,29 @@
+ // apps/web/src/lib/ingest_upsert.ts
+ import { pool } from "@/lib/pg";
+ import { createHash } from "crypto";
+-import { embedQuery } from "@/lib/embeddings"; // одна и та же модель для query/passage — ок для cosine
++import { embedQuery } from "@/lib/embeddings";
+ 
+ export type IngestChunk = {
+   content: string;
+-  chunk_no: number;                  // 0..N-1 (стабильная нумерация)
++  chunk_no: number;
+   metadata?: Record<string, any>;
+ };
+ 
+ export type IngestDoc = {
+-  ns: string;                        // например: "rebecca/army/refs"
++  ns: string;
+   slot: "staging" | "prod";
+-  source_id: string;                 // URL | file:<sha256> | gh:<owner>/<repo>@<ref>:<path>
++  source_id: string;
+   url?: string | null;
+   title?: string | null;
+-  published_at?: string | null;      // ISO или null
+-  source_type?: string | null;       // "url" | "pdf" | "github" | ...
+-  kind?: string | null;              // "doc" | "section" | ...
++  published_at?: string | null;
++  source_type?: string | null;
++  kind?: string | null;
+   chunks: IngestChunk[];
+   doc_metadata?: Record<string, any>;
+ };
+ 
+-/** SHA-256 в hex от текста */
+ const hashText = (t: string) => createHash("sha256").update(t).digest("hex");
+ 
+-/** простая параллельная обёртка над embedQuery */
+ async function embedMany(texts: string[], concurrency = 8): Promise<number[][]> {
+   const out: number[][] = new Array(texts.length);
+   let i = 0;
+@@ -40,7 +38,6 @@ async function embedMany(texts: string[], concurrency = 8): Promise<number[][]>
+   return out;
+ }
+ 
+-/** минимальная нормализация строк */
+ const sanitize = (s: unknown, max = 10_000): string | null => {
+   if (typeof s !== "string") return null;
+   const t = s.replace(/\u0000/g, "").trim();
+@@ -48,13 +45,11 @@ const sanitize = (s: unknown, max = 10_000): string | null => {
+   return t.length > max ? t.slice(0, max) : t;
+ };
+ 
+-/** быстрая проверка размерности векторной колонки */
+-const EXPECTED_DIM = 1536; // держим в синхроне с schema: vector(1536)
++const EXPECTED_DIM = 1536;
+ 
+ export async function upsertChunks(docs: IngestDoc[]) {
+   if (!docs.length) return { inserted: 0, updated: 0, total: 0 };
+ 
+-  // 0) валидация входа (раньше, чтобы падать до эмбеддингов)
+   for (const d of docs) {
+     if (!d.ns?.trim()) throw new Error("upsertChunks: ns is required");
+     if (d.slot !== "staging" && d.slot !== "prod") {
+@@ -66,7 +61,6 @@ export async function upsertChunks(docs: IngestDoc[]) {
+     }
+   }
+ 
+-  // 1) готовим плоскую вставку: фильтруем пустые/очевидный мусор
+   const flat: Array<{
+     ns: string;
+     slot: "staging" | "prod";
+@@ -86,7 +80,6 @@ export async function upsertChunks(docs: IngestDoc[]) {
+   for (const d of docs) {
+     const commonMeta = d.doc_metadata || {};
+     for (const ch of d.chunks) {
+-      // чистим контент; отбрасываем совсем мелочь (< 5 символов после trim)
+       const content = sanitize(ch.content, 50_000);
+       if (!content || content.length < 5) continue;
+ 
+@@ -111,10 +104,8 @@ export async function upsertChunks(docs: IngestDoc[]) {
+ 
+   if (!flat.length) return { inserted: 0, updated: 0, total: 0 };
+ 
+-  // 2) эмбеддинги (однотипная модель норм для cosine)
+   const embeddings = await embedMany(flat.map(f => f.content));
+ 
+-  // 3) контрольная проверка размерности (ловим рассинхрон с vector(N))
+   if (embeddings.length !== flat.length) {
+     throw new Error(`upsertChunks: embeddings count mismatch: got ${embeddings.length}, expected ${flat.length}`);
+   }
+@@ -131,37 +122,36 @@ export async function upsertChunks(docs: IngestDoc[]) {
+ 
+     let inserted = 0, updated = 0;
+ 
+-    // 4) батчевой UPSERT
+     const BATCH = 500;
+     for (let off = 0; off < flat.length; off += BATCH) {
+       const slice = flat.slice(off, off + BATCH);
+-      const vecs  = embeddings.slice(off, off + BATCH).map(v => `[${v.join(",")}]`);
++      const vecs  = embeddings.slice(off, off + BATCH);
+ 
+-      // 13 параметров на строку (embedding как литерал ::vector — быстрее и проще, чем массив параметров)
+       const rowsSql: string[] = [];
+       const params: any[] = [];
+       slice.forEach((r, i) => {
+-        const base = i * 13;
++        const base = i * 14;
+         rowsSql.push(`(
+-          $${base + 1}::text,          -- ns
+-          $${base + 2}::text,          -- slot
+-          $${base + 3}::text,          -- content
+-          ${vecs[i]}::vector,          -- embedding
+-          $${base + 4}::text,          -- url
+-          $${base + 5}::text,          -- title
+-          $${base + 6}::text,          -- snippet
+-          $${base + 7}::timestamptz,   -- published_at
+-          $${base + 8}::text,          -- source_type
+-          $${base + 9}::text,          -- kind
+-          $${base +10}::jsonb,         -- metadata
+-          $${base +11}::text,          -- content_hash
+-          $${base +12}::text,          -- source_id
+-          $${base +13}::int            -- chunk_no
++          $${base + 1}::text,
++          $${base + 2}::text,
++          $${base + 3}::text,
++          $${base + 4}::vector,
++          $${base + 5}::text,
++          $${base + 6}::text,
++          $${base + 7}::text,
++          $${base + 8}::timestamptz,
++          $${base + 9}::text,
++          $${base +10}::text,
++          $${base +11}::jsonb,
++          $${base +12}::text,
++          $${base +13}::text,
++          $${base +14}::int
+         )`);
+         params.push(
+           r.ns,
+           r.slot,
+           r.content,
++          `[${vecs[i].join(",")}]`, // Pass embedding as a string representation of a vector
+           r.url,
+           r.title,
+           r.snippet,
+@@ -213,3 +203,5 @@ export async function upsertChunks(docs: IngestDoc[]) {
+     client.release();
+   }
+ }
++
++
+diff --git a/apps/web/src/lib/retrieval-contract.ts b/apps/web/src/lib/retrieval-contract.ts
+index 68e6506..efecdce 100644
+--- a/apps/web/src/lib/retrieval-contract.ts
++++ b/apps/web/src/lib/retrieval-contract.ts
+@@ -29,15 +29,12 @@ export type RetrieveItem = {
+   id: string;
+   url: string | null;
+   title: string | null;
+-  snippet: string | null;
+-  score: number;            // итоговый (после пересчётов)
+-  similarity: number;       // сырая косинусная близость
+-  published_at: string | null;
+-  source_type: string | null;
+-  kind: string | null;
++  content: string | null;
++  score: number;
+ };
+ 
+ export type RetrieveResponse = {
+   items: RetrieveItem[];
++  filterInfo: { allowMatched: number; denySkipped: number };
+   debugVersion: "rc-v1";
+ };
+diff --git a/apps/web/src/lib/retriever_v2.ts b/apps/web/src/lib/retriever_v2.ts
+index 6c8c128..a3db3e2 100644
+--- a/apps/web/src/lib/retriever_v2.ts
++++ b/apps/web/src/lib/retriever_v2.ts
+@@ -28,7 +28,7 @@ type Row = {
+   slot: string;
+   url: string | null;
+   title: string | null;
+-  snippet: string | null;
++  content: string | null;
+   published_at: string | null;
+   source_type: string | null;
+   kind: string | null;
+@@ -90,7 +90,7 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
+   // строим основной текст запроса с «дыркой» под домен
+   const base = `
+     SELECT
+-      id, ns, slot, url, title, snippet,
++      id, ns, slot, url, title, content,
+       COALESCE(to_char(published_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), NULL) AS published_at,
+       source_type, kind, metadata,
+       (1 - (embedding <=> $VEC::vector)) AS sim
+@@ -185,7 +185,7 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
+   // теперь окончательный текст
+   const finalSQL = `
+     SELECT
+-      id, ns, slot, url, title, snippet,
++      id, ns, slot, url, title, content,
+       COALESCE(to_char(published_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), NULL) AS published_at,
+       source_type, kind, metadata,
+       (1 - (embedding <=> $${next}::vector)) AS sim
+@@ -228,16 +228,10 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
+     const score = ALPHA * r.sim + BETA * timeDecay(r.published_at);
+     return {
+       id: r.id,
+-      ns: r.ns,
+-      slot: r.slot,
+       url: r.url,
+       title: r.title,
+-      snippet: r.snippet,
++      content: r.content,
+       score,
+-      publishedAt: r.published_at,
+-      sourceType: r.source_type,
+-      kind: r.kind,
+-      metadata: r.metadata ?? {},
+     };
+   });
+ 
+@@ -246,13 +240,8 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
+     .slice(0, topK);
+ 
+   const filterInfo = {
+-    nsMode: req.nsMode,
+-    candidateK,
+-    minSimilarity: req.minSimilarity,
+-    droppedAfterSimilarity: rows.length - afterSim.length,
+-    droppedAfterDomain: afterSim.length - afterDomain.length,
+-    domainAllow: req.domainFilter?.allow ?? [],
+-    domainDeny: req.domainFilter?.deny ?? [],
++    allowMatched: afterDomain.length,
++    denySkipped: rows.length - afterDomain.length,
+   };
+ 
+   return { items, filterInfo, debugVersion: "rc-v1" };
+diff --git a/apps/web/src/lib/retryFetch.ts b/apps/web/src/lib/retryFetch.ts
+new file mode 100644
+index 0000000..87177c4
+--- /dev/null
++++ b/apps/web/src/lib/retryFetch.ts
+@@ -0,0 +1,32 @@
++import { sleep } from "./sleep";
++
++const DEFAULT_RETRIES = 3;
++const DEFAULT_BACKOFF_FACTOR = 2;
++
++export async function retryFetch(url: string, options?: RequestInit, retries = DEFAULT_RETRIES, backoffFactor = DEFAULT_BACKOFF_FACTOR): Promise<Response> {
++  let lastError: any = null;
++  for (let i = 0; i < retries; i++) {
++    try {
++      const response = await fetch(url, options);
++      if (response.ok) {
++        return response;
++      } else if (response.status === 429) { // Too Many Requests
++        const retryAfter = response.headers.get('Retry-After');
++        const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(backoffFactor, i) * 1000;
++        console.warn(`Rate limited. Retrying after ${delay / 1000} seconds...`);
++        await sleep(delay);
++      } else {
++        // For other non-OK responses, throw an error to retry (or fail if no retries left)
++        throw new Error(`HTTP error! status: ${response.status} ${response.statusText}`);
++      }
++    } catch (error) {
++      lastError = error;
++      const delay = Math.pow(backoffFactor, i) * 1000;
++      console.warn(`Fetch failed (${error}). Retrying after ${delay / 1000} seconds...`);
++      await sleep(delay);
++    }
++  }
++  throw lastError; // Re-throw the last error if all retries fail
++}
++
++
+diff --git a/apps/web/src/lib/sleep.ts b/apps/web/src/lib/sleep.ts
+new file mode 100644
+index 0000000..abad2c6
+--- /dev/null
++++ b/apps/web/src/lib/sleep.ts
+@@ -0,0 +1,5 @@
++export async function sleep(ms: number): Promise<void> {
++  return new Promise(resolve => setTimeout(resolve, ms));
++}
++
++
+-- 
+2.43.0
+

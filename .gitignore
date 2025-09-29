@@ -32,3 +32,15 @@ apps/web/sanity-bundle-*.tar.gz
 apps/web/eval_reports/
 *.log
 .DS_Store
+# env & local
+apps/web/.env.local
+.env
+*.env
+# build caches
+.next/
+dist/
+build/
+coverage/
+# OS
+.DS_Store
+Thumbs.db
