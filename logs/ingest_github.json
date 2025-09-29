@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "ns": "rebecca/army/refs",
+  "slot": "staging",
+  "owner": "openai",
+  "repo": "openai-cookbook",
+  "ref": "main",
+  "totalFiles": 57,
+  "windowStart": 0,
+  "windowEnd": 9,
+  "pageFiles": 10,
+  "chunks": 45,
+  "written": [],
+  "nextCursor": 10,
+  "ms": 11031
+}

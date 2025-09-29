@@ -1,0 +1,3 @@
+https://www.rfc-editor.org/rfc/rfc7231
+https://www.rfc-editor.org/rfc/rfc9110
+# комментарии и пустые строки игнорируются

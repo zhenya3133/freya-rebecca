@@ -1,60 +1,66 @@
 // apps/web/src/app/api/retrieve/route.ts
 import { NextResponse } from "next/server";
-import { retrieveV2, type RecencyOptions } from "@/lib/retriever_v2";
+import { retrieveV2 } from "@/lib/retriever_v2";
+import type {
+  RetrieveRequest,
+  RetrieveResponse,
+  NsMode,
+} from "@/lib/retrieval-contract";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Body = {
+  q: string;
   ns: string;
-  slot?: string | null;
-  query: string;
-
+  slot?: "staging" | "prod" | string | null;
   topK?: number;
   candidateK?: number;
-
-  nsMode?: "strict" | "prefix";
-  includeKinds?: string[] | null;
-  includeSourceTypes?: string[] | null;
-
   minSimilarity?: number;
-
-  recency?: RecencyOptions | null;
+  nsMode?: NsMode;
+  domainFilter?: { allow?: string[]; deny?: string[] } | null;
 };
 
 export async function POST(req: Request) {
-  const t0 = Date.now();
-  let stage = "init";
   try {
-    stage = "parse";
-    const body = (await req.json()) as Body;
+    const b = (await req.json()) as Body;
 
-    if (!body?.ns) {
-      return NextResponse.json({ ok: false, error: "ns required" }, { status: 400 });
+    // обязательные поля
+    if (!b?.q || !b?.ns) {
+      return NextResponse.json(
+        { error: "q and ns are required" },
+        { status: 400 }
+      );
     }
-    if (!body?.query?.trim()) {
-      return NextResponse.json({ ok: false, error: "query required" }, { status: 400 });
-    }
 
-    stage = "retrieve";
-    const result = await retrieveV2({
-      ns: body.ns,
-      slot: body.slot ?? "staging",
-      query: body.query,
-      topK: body.topK ?? 5,
-      candidateK: body.candidateK ?? 200,
-      nsMode: body.nsMode ?? "strict",
-      includeKinds: body.includeKinds ?? null,
-      includeSourceTypes: body.includeSourceTypes ?? null,
-      minSimilarity: typeof body.minSimilarity === "number" ? body.minSimilarity : undefined,
-      recency: body.recency ?? { enabled: true, halfLifeDays: 30, weight: 0.2, usePublishedAt: false },
-    });
+    // нормализация
+    const slot = (b.slot === "prod" ? "prod" : "staging") as "staging" | "prod";
+    const topK = Math.max(1, Math.min(Number(b.topK ?? 5), 50));
+    const candidateK = Math.max(topK, Math.min(Number(b.candidateK ?? 200), 1000));
+    const minSimilarity = Math.max(0, Math.min(Number(b.minSimilarity ?? 0), 1));
+    const nsMode: NsMode = b.nsMode === "strict" ? "strict" : "prefix";
 
-    return NextResponse.json({ ok: true, ...result, took_ms_route: Date.now() - t0 });
+    const body: RetrieveRequest = {
+      q: String(b.q),
+      ns: String(b.ns),
+      slot,
+      topK,
+      candidateK,
+      minSimilarity,
+      nsMode,
+      domainFilter: b.domainFilter ?? null,
+    };
+
+    const out: RetrieveResponse = await retrieveV2(body);
+    return NextResponse.json(out, { status: 200 });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, stage, error: e?.message || String(e) },
-      { status: 500 },
+      { error: e?.message || String(e) },
+      { status: 500 }
     );
   }
+}
+
+export function GET() {
+  return NextResponse.json({ error: "Method Not Allowed" }, { status: 405 });
 }

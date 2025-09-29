@@ -1,41 +1,37 @@
 {
   "compilerOptions": {
-    "target": "ES2017",
-    "lib": [
-      "dom",
-      "dom.iterable",
-      "esnext"
-    ],
-    "allowJs": true,
-    "skipLibCheck": true,
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "strict": true,
     "noEmit": true,
+    "allowJs": true,
+    "skipLibCheck": true,
     "esModuleInterop": true,
-    "module": "esnext",
-    "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
     "baseUrl": ".",
     "paths": {
-      "@/*": [
-        "src/*"
-      ]
-    }
+      "@/*": ["./src/*"],
+      "@lib/*": ["./src/lib/*"]
+    },
+    "plugins": [{ "name": "next" }]
   },
   "include": [
     "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
+    "src/**/*.ts",
+    "src/**/*.tsx",
     ".next/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "scripts",                         // apps/web/scripts/** (не нужно tsc)
+    "src/app/api/_archive/**",         // исторические ручки
+    "src/app/api/rag/**",              // старые RAG ручки
+    "src/app/api/memory/**",           // старые memories ручки
+    "src/lib/rag-core.ts"              // старое ядро RAG (не используется)
   ]
 }

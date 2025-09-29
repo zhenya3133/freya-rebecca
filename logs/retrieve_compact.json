@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "score": 0.2869053699785045,
+      "title": null,
+      "url": "https://www.rfc-editor.org/rfc/rfc9110"
+    },
+    {
+      "score": 0.27465805938993865,
+      "title": null,
+      "url": "https://arxiv.org/pdf/2402.19472.pdf"
+    },
+    {
+      "score": 0.2718477804246224,
+      "title": null,
+      "url": "https://www.rfc-editor.org/rfc/rfc9110"
+    },
+    {
+      "score": 0.26408371990420404,
+      "title": null,
+      "url": "https://arxiv.org/pdf/2402.19472.pdf"
+    },
+    {
+      "score": 0.25675109097348686,
+      "title": null,
+      "url": "https://arxiv.org/pdf/2402.19472.pdf"
+    }
+  ],
+  "filterInfo": {
+    "allowMatched": 200,
+    "denySkipped": 0
+  },
+  "debugVersion": "rc-v1"
+}

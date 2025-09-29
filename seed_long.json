@@ -1,0 +1,34 @@
+{
+  "ns": "rebecca/army/refs",
+  "slot": "staging",
+  "items": [
+    {
+      "source_id": "test://seed/minimal",
+      "url": "test://seed/minimal",
+      "title": "Minimal Seed Doc",
+      "published_at": null,
+      "source_type": "seed",
+      "kind": "doc",
+      "text": "Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. \n\nHello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. ",
+      "doc_metadata": {
+        "note": "minimal-e2e"
+      },
+      "chunks": [
+        {
+          "chunk_no": 0,
+          "content": "Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. Hello RC-v1. This is chunk #0. ",
+          "metadata": {
+            "p": 1
+          }
+        },
+        {
+          "chunk_no": 1,
+          "content": "Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. Hello RC-v1. This is chunk #1. ",
+          "metadata": {
+            "p": 2
+          }
+        }
+      ]
+    }
+  ]
+}

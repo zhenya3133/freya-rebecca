@@ -1,0 +1,8 @@
+{ "q": "Что такое микрозадачи (microtasks) в Event Loop и как они связаны с Promise?", "must_have": ["developer.mozilla.org", "html.spec.whatwg.org"], "k": 10 }
+{ "q": "Как работает console.time()/console.timeEnd() и есть ли ограничения по label?", "must_have": ["developer.mozilla.org"], "k": 10 }
+{ "q": "Как создать инициализационный агент GitHub Actions, который генерирует issue по шаблону?", "must_have": ["github.com", "docs.github.com"], "k": 10 }
+{ "q": "Какие ключевые отличия между queueMicrotask и process.nextTick?", "must_have": ["developer.mozilla.org", "nodejs.org"], "k": 10 }
+{ "q": "Что делает Console API метод console.groupCollapsed и как закрыть группу?", "must_have": ["developer.mozilla.org"], "k": 10 }
+{ "q": "Шаблон агента для веб-скрейпинга с ограничением домена: best practices?", "must_have": ["github.com", "chromedevtools.github.io"], "k": 10 }
+{ "q": "Порядок обработки задач: timers, pending, idle, poll, check, close — объясни на примере?", "must_have": ["nodejs.org"], "k": 10 }
+{ "q": "Есть ли у console.assert побочные эффекты и как правильно формировать условие?", "must_have": ["developer.mozilla.org"], "k": 10 }

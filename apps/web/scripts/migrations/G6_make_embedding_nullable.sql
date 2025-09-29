@@ -1,0 +1,2 @@
+ALTER TABLE chunks ALTER COLUMN embedding DROP NOT NULL;
+
