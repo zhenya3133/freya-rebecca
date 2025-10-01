@@ -1,11 +1,9 @@
+// apps/web/src/app/api/db-ping/route.ts
 import { NextResponse } from 'next/server';
-import { q } from '@/lib/db';
+
+// чтобы route был всегда динамический и не кешировался
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  try {
-    const rows = await q<{ now: string }>('SELECT now()');
-    return NextResponse.json({ ok: true, now: rows[0]?.now });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: String(e?.message ?? e) }, { status: 500 });
-  }
+  return NextResponse.json({ ok: true }, { status: 200 });
 }

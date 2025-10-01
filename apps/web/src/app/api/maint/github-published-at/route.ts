@@ -1,6 +1,7 @@
 // apps/web/src/app/api/maint/github-published-at/route.ts
 import { NextResponse } from "next/server";
 import { pool } from "@/lib/db";
+import { getPool } from "@/lib/pg";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,7 +67,7 @@ async function fetchLatestCommitDate(owner: string, repo: string, path: string, 
 export async function POST(req: Request) {
   const t0 = Date.now();
   let stage = "init";
-  const client = await pool.connect();
+  const client: any = await (getPool() as any).connect();
   try {
     assertAdmin(req);
     const {

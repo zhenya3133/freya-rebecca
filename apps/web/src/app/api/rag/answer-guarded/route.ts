@@ -98,7 +98,8 @@ export async function POST(req: NextRequest) {
     // ограничим topK
     const safeTopK = Math.max(1, Math.min(16, Number(topK)));
 
-    const chunks = await retrieveV2({ ns, query, fetchK, topK: safeTopK, minScore, slot });
+    const response = await retrieveV2({ ns, q: query, slot, candidateK: fetchK, topK: safeTopK, minSimilarity: minScore });
+    const chunks = response.items;
     if (!chunks.length) {
       const fallback =
         profile === "json" ? "[]" :
@@ -111,9 +112,9 @@ export async function POST(req: NextRequest) {
 
     const numbered: string[] = [];
     const sources = chunks.map((c, i) => {
-      const title = c.source?.title || c.source?.path || c.source?.url || c.id;
-      numbered.push(`[#${i + 1}] ${title}\n${clamp(c.content)}`);
-      return { n: i + 1, path: c.source?.path, url: c.source?.url, score: Number(c.final.toFixed(4)) };
+      const title = c.title || c.url || c.id;
+      numbered.push(`[#${i + 1}] ${title}\n${clamp(c.content || "")}`);
+      return { n: i + 1, path: null, url: c.url, score: Number(c.score.toFixed(4)) };
     });
 
     const user = buildUser(profile as Profile, query, numbered);
@@ -138,8 +139,8 @@ export async function POST(req: NextRequest) {
     }
 
     const matches = chunks.slice(0, 3).map(c => ({
-      id: c.id, path: c.source?.path, url: c.source?.url,
-      score: Number(c.final.toFixed(4)), preview: clamp(c.content, 500)
+      id: c.id, path: null, url: c.url,
+      score: Number(c.score.toFixed(4)), preview: clamp(c.content || "", 500)
     }));
 
     return NextResponse.json({

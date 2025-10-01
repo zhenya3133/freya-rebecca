@@ -54,7 +54,7 @@ export async function POST(req: Request) {
 
     const { rows } = await withPgRetry(() => pool.query(sql, params));
 
-    const matches = rows.map(r => ({
+    const matches = rows.map((r: any) => ({
       id: r.id,
       path: r.path,
       ns: r.ns,

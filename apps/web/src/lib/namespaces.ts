@@ -132,5 +132,5 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 export async function listNamespaces(): Promise<string[]> {
   // Если у тебя schema другая, поменяй таблицу/поле
   const { rows } = await pool.query('SELECT DISTINCT namespace FROM chunks ORDER BY namespace;');
-  return rows.map(r => r.namespace as string);
+  return rows.map((r: any) => r.namespace as string);
 }

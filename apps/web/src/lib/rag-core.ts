@@ -36,7 +36,7 @@ export async function retrieveMatches(ns: string, query: string, topK = 8): Prom
   const emb = await openai.embeddings.create({ model: EMBED_MODEL, input: query });
   const vec = toVecLiteral(emb.data[0].embedding as unknown as number[], 6);
 
-  const r = await q(
+  const rows = await q(
     `
     select id, ns, slot, content, source,
            1 - (embedding <=> $1::vector) as score
@@ -48,7 +48,7 @@ export async function retrieveMatches(ns: string, query: string, topK = 8): Prom
     [vec, ns, topK]
   );
 
-  const res: Match[] = (r.rows || []).map((row: any) => ({
+  const res: Match[] = rows.map((row: any) => ({
     id: row.id,
     ns: row.ns,
     score: Number(row.score ?? 0),
@@ -93,7 +93,7 @@ export async function buildRagAnswer(
     .map((m, i) => `[#${i + 1}] score=${m.score.toFixed(3)} path=${m.path || ""}\n${m.content}`)
     .join("\n\n---\n\n");
 
-  const messages = [
+  const messages: Array<{ role: "system" | "user"; content: string }> = [
     { role: "system", content: opts.system || "Ты — помощник. Отвечай кратко и по делу." },
     { role: "user", content:
 `Вопрос: ${opts.query}
@@ -106,7 +106,7 @@ ${contextBlocks}
 - Ссылайся на источники в конце формата "Sources: [#n, #m]".
 - Если контекста недостаточно — напиши: "Недостаточно близкого контекста."`
     }
-  ] as const;
+  ];
 
   const completion = await openai.chat.completions.create({
     model,

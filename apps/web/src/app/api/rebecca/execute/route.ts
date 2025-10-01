@@ -81,8 +81,8 @@ export async function POST(req: Request) {
     const usage: any = (completion as any).usage ?? null;
     const tokens =
       usage?.total_tokens ??
-      ((usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0)) ??
-      null;
+      (((usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0)) ||
+      null);
 
     return jsonOk({
       ns,
