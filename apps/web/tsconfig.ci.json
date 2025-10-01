@@ -5,16 +5,7 @@
     "skipLibCheck": true,
     "types": ["node", "react", "react-dom", "next"]
   },
-  "include": [
-    "next-env.d.ts",
-    "src/**/*.d.ts",
-    "src/types/**/*.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    ".next",
-    "**/*.test.ts",
-    "**/*.test.tsx",
-    "src/**"
+  "files": [
+    "next-env.d.ts"
   ]
 }
