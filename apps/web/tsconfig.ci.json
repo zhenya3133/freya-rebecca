@@ -2,10 +2,9 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "skipLibCheck": true,
-    "types": ["node", "react", "react-dom", "next"]
+    "skipLibCheck": true
   },
   "files": [
-    "next-env.d.ts"
+    "ci.d.ts"
   ]
 }
