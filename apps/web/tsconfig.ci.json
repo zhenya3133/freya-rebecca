@@ -3,11 +3,14 @@
   "compilerOptions": {
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["next", "node", "react", "react-dom"]
+    "types": ["node"]
   },
   "include": [
     "src/**/*.ts",
-    "src/**/*.tsx",
-    ".next/types/**/*.ts"
+    "src/**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    ".next"
   ]
 }
