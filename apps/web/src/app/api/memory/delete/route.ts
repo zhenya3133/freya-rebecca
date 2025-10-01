@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json().catch(() => ({} as any));
     const rawIds: string[] = Array.isArray(body?.ids)
-      ? body.ids.map(String).map(s => s.trim()).filter(Boolean)
+      ? body.ids.map(String).map((s: string) => s.trim()).filter(Boolean)
       : [];
     const goodIds = rawIds.filter(isUuid);
     const badIds  = rawIds.filter(id => !isUuid(id));

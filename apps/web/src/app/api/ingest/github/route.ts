@@ -5,6 +5,7 @@ import { chunkText, normalizeChunkOpts } from "@/lib/chunking";
 import { retryFetch } from "@/lib/retryFetch";
 import { assertAdmin } from "@/lib/admin";
 import { upsertChunksWithTargets, type IngestDoc } from "@/lib/ingest_upsert";
+import { getPool } from "@/lib/pg";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -250,8 +251,8 @@ export async function POST(req: Request) {
     const docs: IngestDoc[] = [];
     let producedChunks = 0;
 
-    const { pool } = await import("@/lib/pg");
-    const client = await pool.connect();
+    const thePool = getPool();
+    const client: any = await (thePool as any).connect();
 
     // sourceIds всей страницы — понадобятся для бэкофилла эмбеддингов даже при skip-fetch
     const sourceIdsPage: string[] = pageFiles.map((p) => `github:${owner}/${repo}@${usedRef}:${p}`);
@@ -263,7 +264,7 @@ export async function POST(req: Request) {
 
         // если в БД уже есть чанки с таким же blob_sha — пропускаем скачивание
         if (blobSha) {
-          const check = await client.query<{ exists: boolean }>(
+          const check = await client.query(
             `
             SELECT EXISTS (
               SELECT 1
@@ -312,7 +313,7 @@ export async function POST(req: Request) {
 
         const doc: IngestDoc = {
           ns,
-          slot,
+          slot: slot as "staging" | "prod",
           source_id: sourceId,
           url: sourceUrl,
           title: null,
@@ -381,7 +382,7 @@ export async function POST(req: Request) {
 
         // (б) бэкофилл: null-эмбеддинги по всем source_id страницы
         if (sourceIdsPage.length) {
-          const r = await client.query<TargetRow>(
+          const r = await client.query(
             `
             SELECT id, content
             FROM chunks
@@ -471,10 +472,7 @@ export async function POST(req: Request) {
       // гарантированно освобождаем подключение
       try { (await import("@/lib/pg")).pool; } catch {}
       // client объявлен выше; проверяем что он существует
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const _any: any = null;
       try {
-        // @ts-expect-error runtime check
         if (typeof (client as any)?.release === "function") (client as any).release();
       } catch {}
     }

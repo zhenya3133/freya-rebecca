@@ -158,12 +158,12 @@ export async function retrieveV2(req: RetrieveRequest): Promise<RetrieveResponse
   finalParams.push(`[${qvec.join(",")}]`);
   finalParams.push(candidateK);
 
-  const res = await pool.query<Row>(finalSQL, finalParams);
-  const rows: Row[] = res.rows;
+  const res = await pool.query(finalSQL, finalParams);
+  const rows = res.rows as Row[];
 
   // пост-фильтр по схожести + домены
   const afterSim: Row[] = rows.filter((r: Row) => r.sim >= minSimilarity);
-  const afterDomain: Row[] = afterSim.filter((r: Row) => matchesDomain(r.url, req.domainFilter));
+  const afterDomain: Row[] = afterSim.filter((r: Row) => matchesDomain(r.url ?? "", req.domainFilter));
 
   // скоринг + topK
   const mapped: RetrieveItem[] = afterDomain.map((r: Row): RetrieveItem => {

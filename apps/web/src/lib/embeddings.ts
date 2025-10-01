@@ -1,7 +1,19 @@
 // apps/web/src/lib/embeddings.ts
 import OpenAI from "openai";
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Lazy initialization to avoid build-time initialization errors
+let client: OpenAI | null = null;
+
+function getClient(): OpenAI {
+  if (!client) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error("OPENAI_API_KEY is not set. Please configure it in .env.local");
+    }
+    client = new OpenAI({ apiKey });
+  }
+  return client;
+}
 
 const MODEL = process.env.EMBED_MODEL || "text-embedding-3-small"; // 1536
 const DIMS = Number(process.env.EMBED_DIMS || 1536);
@@ -24,7 +36,7 @@ export function toVectorLiteral(vec: number[] | { embedding: number[] }): string
     ? (vec as any).embedding
     : [];
   if (!arr.length) throw new Error("Empty embedding vector");
-  return `[${arr.map((x) => Number(x)).join(",")}]`;
+  return `[${arr.map((x: any) => Number(x)).join(",")}]`;
 }
 
 export async function embedMany(texts: string[]): Promise<number[][]> {
@@ -62,7 +74,7 @@ export async function embedMany(texts: string[]): Promise<number[][]> {
 
   const out: number[][] = [];
   for (const b of batches) {
-    const res = await client.embeddings.create({ model: MODEL, input: b });
+    const res = await getClient().embeddings.create({ model: MODEL, input: b });
     for (const row of res.data) {
       const v = row.embedding as unknown as number[];
       if (!Array.isArray(v)) {

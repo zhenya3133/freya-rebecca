@@ -33,15 +33,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "query and ns are required" }, { status: 400 });
     }
 
-    const chunks = await retrieveV2({ ns, query, fetchK, topK, minScore, slot, lambda });
+    const response = await retrieveV2({ ns, q: query, slot: slot as "staging" | "prod", candidateK: fetchK, topK, minSimilarity: minScore });
+    const chunks = response.items;
 
     return NextResponse.json({
       ok: true,
       matches: chunks.map(c => ({
         id: c.id,
         ns,
-        score: Number(c.final.toFixed(4)),
-        snippet: c.content.slice(0, 500),
+        score: Number(c.score.toFixed(4)),
+        snippet: (c.content || "").slice(0, 500),
       })),
     }, { status: 200 });
   } catch (e: any) {

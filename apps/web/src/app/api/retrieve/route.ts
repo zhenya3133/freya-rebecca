@@ -4,7 +4,6 @@ import { retrieveV2 } from "@/lib/retriever_v2";
 import type {
   RetrieveRequest,
   RetrieveResponse,
-  NsMode,
 } from "@/lib/retrieval-contract";
 
 export const runtime = "nodejs";
@@ -17,7 +16,7 @@ type Body = {
   topK?: number;
   candidateK?: number;
   minSimilarity?: number;
-  nsMode?: NsMode;
+  nsMode?: "strict" | "prefix";
   domainFilter?: { allow?: string[]; deny?: string[] } | null;
 };
 
@@ -38,7 +37,7 @@ export async function POST(req: Request) {
     const topK = Math.max(1, Math.min(Number(b.topK ?? 5), 50));
     const candidateK = Math.max(topK, Math.min(Number(b.candidateK ?? 200), 1000));
     const minSimilarity = Math.max(0, Math.min(Number(b.minSimilarity ?? 0), 1));
-    const nsMode: NsMode = b.nsMode === "strict" ? "strict" : "prefix";
+    const nsMode = b.nsMode === "strict" ? "strict" : "prefix";
 
     const body: RetrieveRequest = {
       q: String(b.q),
@@ -48,7 +47,7 @@ export async function POST(req: Request) {
       candidateK,
       minSimilarity,
       nsMode,
-      domainFilter: b.domainFilter ?? null,
+      domainFilter: b.domainFilter ?? undefined,
     };
 
     const out: RetrieveResponse = await retrieveV2(body);

@@ -58,8 +58,8 @@ export async function POST(req: NextRequest) {
         ORDER BY id
         LIMIT $${selectParams.length}
       `;
-      const sel = await pool.query<{ id: string; content: string }>(selectSql, selectParams);
-      const rows = sel.rows;
+      const sel = await pool.query(selectSql, selectParams);
+      const rows = sel.rows as Array<{ id: string; content: string }>;
       if (!rows.length) break;
 
       // Эмбеддинги: ДОЛЖНЫ быть длины, соответствующей типу vector(N) в БД (у тебя N=383)

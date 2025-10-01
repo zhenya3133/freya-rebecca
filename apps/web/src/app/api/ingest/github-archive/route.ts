@@ -107,7 +107,7 @@ export async function POST(req: Request) {
 
     // 1) качаем tar.gz из codeload (почти без rate-limit)
     stage = "download";
-    const tarUrl = `https://codeload.github.com/${owner}/${repo}/tar.gz/${encodeURIComponent(ref)}`;
+    const tarUrl = `https://codeload.github.com/${owner}/${repo}/tar.gz/${encodeURIComponent(ref ?? "main")}`;
     const res = await fetch(tarUrl, { headers: { "User-Agent": UA, Accept: "application/x-gzip,*/*" }, redirect: "follow" as any });
     if (!res.ok || !res.body) {
       throw new Error(`codeload ${res.status} ${res.statusText}`);

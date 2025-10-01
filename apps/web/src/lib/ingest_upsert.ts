@@ -46,7 +46,7 @@ function makeSnippet(text: string, max = 480): string {
 export async function upsertChunks(docs: IngestDoc[]): Promise<UpsertResult> {
   if (!Array.isArray(docs) || docs.length === 0) return { inserted: 0, updated: 0 };
 
-  const client = await pool.connect();
+  const client: any = await (pool as any).connect();
   try {
     await client.query("BEGIN");
     let inserted = 0, updated = 0;
@@ -108,7 +108,7 @@ export async function upsertChunks(docs: IngestDoc[]): Promise<UpsertResult> {
           ch.chunk_no,
         ];
 
-        const res = await client.query<{ inserted: boolean }>(textInsert, params);
+        const res = await client.query(textInsert, params);
         if (res.rows[0]?.inserted) inserted += 1;
         else updated += 1;
       }
@@ -135,7 +135,7 @@ export async function upsertChunksWithTargets(docs: IngestDoc[]): Promise<Upsert
     return { inserted: 0, updated: 0, targets: [], unchanged: 0 };
   }
 
-  const client = await pool.connect();
+  const client: any = await (pool as any).connect();
   try {
     await client.query("BEGIN");
     let inserted = 0, updated = 0, unchanged = 0;
@@ -194,7 +194,7 @@ export async function upsertChunksWithTargets(docs: IngestDoc[]): Promise<Upsert
         });
 
         // 1) Быстрый чек: есть ли запись и совпадает ли hash → unchanged
-        const existing = await client.query<{ id: string; content_hash: string }>(
+        const existing = await client.query(
           textSelectExisting,
           [ns, slot, d.source_id ?? null, ch.chunk_no]
         );
@@ -221,11 +221,7 @@ export async function upsertChunksWithTargets(docs: IngestDoc[]): Promise<Upsert
           ch.chunk_no,
         ];
 
-        const res = await client.query<{
-          id: string;
-          inserted: boolean;
-          new_content: string;
-        }>(textInsertReturn, params);
+        const res = await client.query(textInsertReturn, params);
 
         for (const row of res.rows) {
           if (row.inserted) inserted += 1;

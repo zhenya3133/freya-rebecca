@@ -58,9 +58,9 @@ export async function withPgRetry<T>(
  */
 export async function q<T = any>(sql: string, params?: any[]): Promise<T[]> {
   return withPgRetry(async () => {
-    const client = await pool.connect();
+    const client: any = await (pool as any).connect();
     try {
-      const res = await client.query<T>(sql, params);
+      const res = await client.query(sql, params);
       return res.rows;
     } finally {
       client.release();

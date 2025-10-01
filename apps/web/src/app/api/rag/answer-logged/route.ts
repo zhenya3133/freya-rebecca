@@ -114,7 +114,8 @@ export async function POST(req: NextRequest) {
     }
 
     // 1) Ретрив
-    const chunks = await retrieveV2({ ns, query, fetchK, topK, minScore, slot });
+    const response = await retrieveV2({ ns, q: query, slot: slot as "staging" | "prod", candidateK: fetchK, topK, minSimilarity: minScore });
+    const chunks = response.items;
     if (!chunks.length) {
       const sp = asSpecial(profileName) || "qa";
       const fallback =
@@ -123,7 +124,7 @@ export async function POST(req: NextRequest) {
         : "Недостаточно близкого контекста.";
 
       // логируем «пустой» ответ
-      logId = await writeLogSafe({
+      await writeLogSafe({
         kind: "rag.answer",
         ns, profile: sp,
         params: sanitize({ temperature, top_p, max_tokens: maxTokens }),
@@ -138,11 +139,10 @@ export async function POST(req: NextRequest) {
 
     // 2) Контекст + источники
     const numbered: string[] = [];
-    const sources = chunks.map((c: any, i: number) => {
-      const title = c.source?.title || c.source?.path || c.source?.url || c.id;
-      numbered.push(`[#${i + 1}] ${title}\n${clamp(String(c.content || ""))}`);
-      const score = typeof c.final === "number" ? c.final : (typeof c.score === "number" ? c.score : 0);
-      return { n: i + 1, path: c.source?.path, url: c.source?.url, score: Number(score?.toFixed?.(4) ?? score ?? 0) };
+    const sources = chunks.map((c, i) => {
+      const title = c.title || c.url || c.id;
+      numbered.push(`[#${i + 1}] ${title}\n${clamp(c.content || "")}`);
+      return { n: i + 1, path: null, url: c.url, score: Number(c.score.toFixed(4)) };
     });
 
     // 3) Профиль: спец или из сидов
@@ -187,14 +187,13 @@ export async function POST(req: NextRequest) {
       sources
     };
 
-    logId = await writeLogSafe({
+    await writeLogSafe({
       kind: "rag.answer.guarded",
       ns,
       profile: effectiveProfile,
       params: sanitize({ temperature: effTemp, top_p: effTopP, max_tokens: maxTokens }),
       request: sanitize({ ns, query, profile: profileName, codeLang, fetchK, topK, minScore, slot }),
-      response: sanitize(payload),
-      meta: { ms: Date.now() - t0 }
+      response: sanitize(payload)
     });
 
     return NextResponse.json({ ...payload, logId });
