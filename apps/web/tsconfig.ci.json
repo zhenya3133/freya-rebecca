@@ -3,7 +3,11 @@
   "compilerOptions": {
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["node", "react", "react-dom", "next"]
+    "types": ["next", "node", "react", "react-dom"]
   },
-  "files": ["next-env.d.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    ".next/types/**/*.ts"
+  ]
 }
