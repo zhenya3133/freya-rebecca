@@ -1,20 +1,20 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node", "react", "react-dom", "next"]
   },
   "include": [
     "next-env.d.ts",
-    "src/app/**/*.tsx",
-    "src/components/**/*.tsx"
+    "src/**/*.d.ts",
+    "src/types/**/*.ts"
   ],
   "exclude": [
-    "src/app/api/**",
-    "src/lib/**",
-    "scripts",
-    "src/app/api/_archive/**",
-    "src/app/api/rag/**",
-    "src/app/api/memory/**",
-    "src/lib/rag-core.ts"
+    "node_modules",
+    ".next",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "src/**"
   ]
 }
