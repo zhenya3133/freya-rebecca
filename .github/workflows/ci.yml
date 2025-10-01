@@ -11,7 +11,6 @@ jobs:
 
     env:
       NODE_ENV: production
-      # опц: если задашь в репозитории -> пробежит интеграционный блок
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       X_ADMIN_KEY: test_admin_key_123
@@ -24,39 +23,41 @@ jobs:
       SLOT: staging
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
       - name: Install deps (root & apps/web)
-        run: npm ci
+        run: |
+          npm ci || npm install
 
-      # 1) типы + линт
+      # 1) Типы + линт
+      # ЯВНО ставим правильный компилятор через npx -p typescript
       - name: Typecheck
-        run: npx -w apps/web tsc --noEmit
+        run: npx -y -p typescript tsc -p apps/web/tsconfig.json --noEmit
 
       - name: ESLint
-        run: npx -w apps/web next lint || true
+        run: npx -y -p eslint npm:eslint -c apps/web/.eslintrc.json --max-warnings=0 apps/web
 
       # 2) shell scripts syntax
       - name: Bash syntax
         run: |
           find apps/web/scripts -type f -name "*.sh" -print0 | xargs -0 -I{} bash -n "{}"
 
-      # 3) интеграционные: только если есть DATABASE_URL
+      # 3) Интеграционные: только если есть DATABASE_URL
       - name: Build Next app
         if: env.DATABASE_URL != ''
-        run: npm run -w apps/web build
+        working-directory: apps/web
+        run: npm run build
 
       - name: Start Next app
         if: env.DATABASE_URL != ''
+        working-directory: apps/web
         run: |
-          npm run -w apps/web start &>/tmp/next.log &
+          npm run start &>/tmp/next.log &
           npx wait-on http://localhost:3000
 
       - name: Contract test /api/retrieve
@@ -65,9 +66,9 @@ jobs:
           chmod +x apps/web/scripts/contract/test_retrieve.sh
           apps/web/scripts/contract/test_retrieve.sh
 
-      # 4) отчёт логов в случае падения
+      # 4) Логи на случай фейла
       - name: Print Next logs on failure
         if: failure()
         run: |
           echo "==== NEXT LOG ===="
-          tail -n +1 /tmp/next.log || true
+          tail -n +200 /tmp/next.log || true
