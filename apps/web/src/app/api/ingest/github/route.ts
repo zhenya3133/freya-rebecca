@@ -119,6 +119,13 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
+function uniqBy<T, K>(arr: T[], key: (x: T) => K): T[] {
+  const seen = new Set<K>();
+  const out: T[] = [];
+  for (const x of arr) { const k = key(x); if (!seen.has(k)) { seen.add(k); out.push(x); } }
+  return out;
+}
+
 async function mapWithConcurrency<I, O>(
   items: I[],
   limit: number,
@@ -238,7 +245,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 3) fetch + chunk (с ограничениями) + SKIP-FETCH + ПАРАЛЛЕЛИЗМ
+    // 3) fetch + chunk (с ограничениями) + SKIP по blob_sha + ПАРАЛЛЕЛИЗМ
     stage = "fetch+chunk";
     const docs: IngestDoc[] = [];
     let producedChunks = 0;
@@ -339,7 +346,6 @@ export async function POST(req: Request) {
       for (const r of perFile) {
         if (!r?.doc) continue;
         if (producedChunks + r.chunks > MAX_TOTAL_CHUNKS) {
-          // обрежем doc до остатка
           const rest = MAX_TOTAL_CHUNKS - producedChunks;
           if (rest <= 0) break;
           const slim: IngestDoc = {
@@ -355,114 +361,123 @@ export async function POST(req: Request) {
           producedChunks += r.chunks;
         }
       }
-    } finally {
-      // client оставляем открытым до окончания эмбеддингов
-    }
 
-    // 4) upsert чанков с таргетами
-    stage = "db-upsert";
-    const { inserted, updated, targets, unchanged } = docs.length
-      ? await upsertChunksWithTargets(docs)
-      : { inserted: 0, updated: 0, targets: [] as {id: string, content: string}[], unchanged: 0 };
+      // 4) upsert чанков с таргетами
+      stage = "db-upsert";
+      const { inserted, updated, targets, unchanged } = docs.length
+        ? await upsertChunksWithTargets(docs)
+        : { inserted: 0, updated: 0, targets: [] as {id: string, content: string}[], unchanged: 0 };
 
-    // 5) эмбеддинги (включая бэкофилл для embedding IS NULL) + БАТЧИ + Пакетный UPDATE
-    let embedWritten = 0;
-    if (!skipEmbeddings) {
-      stage = "embed+backfill";
+      // 5) эмбеддинги (включая бэкофилл для embedding IS NULL) + БАТЧИ + Пакетный UPDATE
+      let embedWritten = 0;
+      if (!skipEmbeddings) {
+        stage = "embed+backfill";
 
-      type TargetRow = { id: string; content: string };
-      const targetRows: TargetRow[] = [];
+        type TargetRow = { id: string; content: string };
+        const targetRowsRaw: TargetRow[] = [];
 
-      // (а) изменившиеся/новые
-      for (const t of targets) targetRows.push({ id: t.id, content: t.content });
+        // (а) изменившиеся/новые
+        for (const t of targets) targetRowsRaw.push({ id: t.id, content: t.content });
 
-      // (б) бэкофилл: null-эмбеддинги по всем source_id страницы
-      if (sourceIdsPage.length) {
-        const r = await client.query<TargetRow>(
-          `
-          SELECT id, content
-          FROM chunks
-          WHERE embedding IS NULL
-            AND source_id = ANY($1)
-          LIMIT $2
-        `,
-          [sourceIdsPage, BACKFILL_LIMIT]
-        );
-        for (const row of r.rows) {
-          if (!targetRows.find((x) => x.id === row.id)) targetRows.push(row);
-        }
-      }
-
-      // Батчами считаем и пишем
-      const batches = chunkArray(targetRows, EMBED_BATCH);
-
-      for (const batch of batches) {
-        if (!batch.length) continue;
-
-        stage = "embed";
-        const vectorsRaw = await embedMany(batch.map((t) => t.content));
-
-        // → строка вида "[0.1,-0.2,...]" без пробелов
-        const toPgVector = (v: any): string => {
-          const arr: number[] = Array.isArray(v)
-            ? v.map((x) => Number(x))
-            : Array.isArray((v as any)?.embedding)
-            ? (v as any).embedding.map((x: any) => Number(x))
-            : [];
-          if (!arr.length) throw new Error("Empty embedding vector");
-          return `[${arr.join(",")}]`;
-        };
-
-        const ids: string[] = [];
-        const vecs: string[] = [];
-        for (let i = 0; i < batch.length; i++) {
-          ids.push(batch[i].id);
-          vecs.push(toPgVector((vectorsRaw as any)[i]));
-        }
-
-        // Пакетный апдейт одним запросом
-        stage = "db-embed";
-        await client.query("BEGIN");
-        try {
-          await client.query(
+        // (б) бэкофилл: null-эмбеддинги по всем source_id страницы
+        if (sourceIdsPage.length) {
+          const r = await client.query<TargetRow>(
             `
-            WITH data AS (
-              SELECT UNNEST($1::text[]) AS id, UNNEST($2::text[]) AS vec
-            )
-            UPDATE chunks c
-            SET embedding = data.vec::vector, updated_at = NOW()
-            FROM data
-            WHERE c.id = data.id
+            SELECT id, content
+            FROM chunks
+            WHERE embedding IS NULL
+              AND source_id = ANY($1)
+            LIMIT $2
             `,
-            [ids, vecs]
+            [sourceIdsPage, BACKFILL_LIMIT]
           );
-          await client.query("COMMIT");
-          embedWritten += ids.length;
-        } catch (e) {
-          await client.query("ROLLBACK");
-          throw e;
+          targetRowsRaw.push(...r.rows);
+        }
+
+        // dedup по id
+        const targetRows = uniqBy(targetRowsRaw, x => x.id);
+
+        const batches = chunkArray(targetRows, EMBED_BATCH);
+
+        for (const batch of batches) {
+          if (!batch.length) continue;
+
+          stage = "embed";
+          const vectorsRaw = await embedMany(batch.map((t) => t.content));
+          if (!Array.isArray(vectorsRaw) || vectorsRaw.length !== batch.length) {
+            throw new Error(`embedMany mismatch: got ${Array.isArray(vectorsRaw) ? vectorsRaw.length : -1} for ${batch.length}`);
+          }
+
+          // → строка вида "[0.1,-0.2,...]" без пробелов
+          const toPgVector = (v: any): string => {
+            const arr: number[] = Array.isArray(v)
+              ? v.map((x) => Number(x))
+              : Array.isArray((v as any)?.embedding)
+              ? (v as any).embedding.map((x: any) => Number(x))
+              : [];
+            if (!arr.length) throw new Error("Empty embedding vector");
+            return `[${arr.join(",")}]`;
+          };
+
+          const ids: number[] = [];
+          const vecs: string[] = [];
+          for (let i = 0; i < batch.length; i++) {
+            ids.push(Number(batch[i].id));               // ВАЖНО: числа, не строки
+            vecs.push(toPgVector((vectorsRaw as any)[i]));
+          }
+
+          // Пакетный апдейт одним запросом; id → bigint[]
+          stage = "db-embed";
+          await client.query("BEGIN");
+          try {
+            await client.query(
+              `
+              WITH data AS (
+                SELECT UNNEST($1::bigint[]) AS id, UNNEST($2::text[]) AS vec
+              )
+              UPDATE chunks c
+              SET embedding = data.vec::vector, updated_at = NOW()
+              FROM data
+              WHERE c.id = data.id
+              `,
+              [ids, vecs]
+            );
+            await client.query("COMMIT");
+            embedWritten += ids.length;
+          } catch (e) {
+            await client.query("ROLLBACK");
+            throw e;
+          }
         }
       }
+
+      // успех
+      return NextResponse.json({
+        ok: true,
+        ns, slot, owner, repo, ref: usedRef,
+        totalFiles,
+        windowStart: cur,
+        windowEnd: cur + pageFiles.length - 1,
+        pageFiles: pageFiles.length,
+        textChunks: producedChunks,
+        textInserted: inserted,
+        textUpdated: updated,
+        unchanged,
+        embedWritten,
+        nextCursor,
+        ms: Date.now() - t0,
+      });
+    } finally {
+      // гарантированно освобождаем подключение
+      try { (await import("@/lib/pg")).pool; } catch {}
+      // client объявлен выше; проверяем что он существует
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const _any: any = null;
+      try {
+        // @ts-expect-error runtime check
+        if (typeof (client as any)?.release === "function") (client as any).release();
+      } catch {}
     }
-
-    // Закрываем подключение
-    client.release();
-
-    return NextResponse.json({
-      ok: true,
-      ns, slot, owner, repo, ref: usedRef,
-      totalFiles,
-      windowStart: cur,
-      windowEnd: cur + pageFiles.length - 1,
-      pageFiles: pageFiles.length,
-      textChunks: producedChunks,
-      textInserted: inserted,
-      textUpdated: updated,
-      unchanged,
-      embedWritten,
-      nextCursor,
-      ms: Date.now() - t0,
-    });
   } catch (e: any) {
     return NextResponse.json({ ok: false, stage, error: e?.message || String(e) }, { status: 500 });
   }

@@ -166,11 +166,35 @@ export async function POST(req: Request) {
     if (!skipEmb && targets.length) {
       const contents = targets.map(t => t.content);
       const vectors  = await embedMany(contents); // проверяет EMBED_DIMS=1536
-      for (let i = 0; i < targets.length; i++) {
-        const id  = targets[i].id;
-        const lit = toVectorLiteral(vectors[i]);
-        await pool.query(`UPDATE chunks SET embedding = $1::vector, updated_at = NOW() WHERE id = $2`, [lit, id]);
-        embedWritten += 1;
+
+      // Пакетный UPDATE по bigint[]
+      const ids: number[] = targets.map(t => Number(t.id));
+      const vecs: string[] = vectors.map(v => {
+        const arr = Array.isArray((v as any)?.embedding)
+          ? ((v as any).embedding as number[])
+          : (v as number[]);
+        return toVectorLiteral(arr);
+      });
+
+      await pool.query("BEGIN");
+      try {
+        await pool.query(
+          `
+          WITH data AS (
+            SELECT UNNEST($1::bigint[]) AS id, UNNEST($2::text[]) AS vec
+          )
+          UPDATE chunks c
+          SET embedding = data.vec::vector, updated_at = NOW()
+          FROM data
+          WHERE c.id = data.id
+          `,
+          [ids, vecs]
+        );
+        await pool.query("COMMIT");
+        embedWritten = ids.length;
+      } catch (e) {
+        await pool.query("ROLLBACK");
+        throw e;
       }
     }
 
