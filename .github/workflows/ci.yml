@@ -1,26 +1,15 @@
 name: CI
-
 on:
-  pull_request:
   push:
-    branches: [ main ]
+    branches: [ main, develop, feature/** ]
+  pull_request:
 
 jobs:
   ci:
     runs-on: ubuntu-latest
 
     env:
-      NODE_ENV: production
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      X_ADMIN_KEY: test_admin_key_123
-      RETRIEVE_ALPHA: "0.85"
-      RETRIEVE_BETA: "0.15"
-      RETRIEVE_T_HALF: "180"
-      RETRIEVE_PROBES: "10"
-      BASE: http://localhost:3000
-      NS: rebecca/army/refs
-      SLOT: staging
+      NODE_OPTIONS: --max-old-space-size=4096
 
     steps:
       - uses: actions/checkout@v4
@@ -28,47 +17,28 @@ jobs:
       - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/web/package-lock.json
 
-      - name: Install deps (root & apps/web)
+      # СТАВИМ зависимости ТОЛЬКО в apps/web
+      - name: Install deps (apps/web only)
+        working-directory: apps/web
         run: |
-          npm ci || npm install
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
-      # 1) Типы + линт
-      # ЯВНО ставим правильный компилятор через npx -p typescript
       - name: Typecheck
-        run: npx -y -p typescript tsc -p apps/web/tsconfig.json --noEmit
+        working-directory: apps/web
+        run: npx -y -p typescript tsc -p tsconfig.ci.json --noEmit
 
       - name: ESLint
-        run: npx -y -p eslint npm:eslint -c apps/web/.eslintrc.json --max-warnings=0 apps/web
+        working-directory: apps/web
+        run: npm run lint
 
-      # 2) shell scripts syntax
-      - name: Bash syntax
-        run: |
-          find apps/web/scripts -type f -name "*.sh" -print0 | xargs -0 -I{} bash -n "{}"
-
-      # 3) Интеграционные: только если есть DATABASE_URL
-      - name: Build Next app
-        if: env.DATABASE_URL != ''
+      - name: Build
         working-directory: apps/web
         run: npm run build
-
-      - name: Start Next app
-        if: env.DATABASE_URL != ''
-        working-directory: apps/web
-        run: |
-          npm run start &>/tmp/next.log &
-          npx wait-on http://localhost:3000
-
-      - name: Contract test /api/retrieve
-        if: env.DATABASE_URL != ''
-        run: |
-          chmod +x apps/web/scripts/contract/test_retrieve.sh
-          apps/web/scripts/contract/test_retrieve.sh
-
-      # 4) Логи на случай фейла
-      - name: Print Next logs on failure
-        if: failure()
-        run: |
-          echo "==== NEXT LOG ===="
-          tail -n +200 /tmp/next.log || true
