@@ -1,11 +1,11 @@
-import { NextResponse } from 'next/server';
-import { q } from '@/lib/db';
+import { NextResponse } from "next/server";
+import { Client } from "pg";
 
 export async function GET() {
-  try {
-    const rows = await q<{ now: string }>('SELECT now()');
-    return NextResponse.json({ ok: true, now: rows[0]?.now });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: String(e?.message ?? e) }, { status: 500 });
-  }
+  const url = process.env.DATABASE_URL!;
+  const client = new Client({ connectionString: url, ssl: false as any });
+  await client.connect();
+  const r = await client.query("select 1 as ok");
+  await client.end();
+  return NextResponse.json({ ok: r.rows[0]?.ok === 1 });
 }
