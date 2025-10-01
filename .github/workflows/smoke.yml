@@ -23,6 +23,7 @@ jobs:
           --health-retries 20
 
     env:
+      CI: true
       DATABASE_URL: postgres://rebecca:rebecca@localhost:5432/rebecca?sslmode=disable
       X_ADMIN_KEY: test-admin
       NEXT_PUBLIC_BASE_URL: http://localhost:3000
@@ -36,18 +37,21 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            apps/web/package-lock.json
+          # кэшируем ТОЛЬКО корневой lockfile — работаем в режиме single-lock
+          cache-dependency-path: package-lock.json
 
-      # ВАЖНО: используем `npm install`, а не `npm ci`.
-      # `npm ci` требует валидный lock, а у тебя он часто отсутствует/ломается.
+      # Гарантируем, что не появится второй lockfile в apps/web
+      - name: Enforce single lockfile
+        run: rm -f apps/web/package-lock.json
+
+      # Корневые зависимости проекта (single lock)
       - name: Install deps (root)
         run: npm install --no-audit --no-fund
 
+      # Локальные зависимости фронта без генерации своего lockfile
       - name: Install deps (apps/web)
         working-directory: apps/web
-        run: npm install --no-audit --no-fund
+        run: npm install --no-audit --no-fund --no-package-lock
 
       - name: Init DB schema
         run: |
