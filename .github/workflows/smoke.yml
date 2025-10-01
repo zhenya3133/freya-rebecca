@@ -79,7 +79,9 @@ jobs:
           SQL
 
       - name: Typecheck
-        run: npx -y -p typescript tsc -p apps/web/tsconfig.ci.json --noEmit
+        run: |
+          cd apps/web
+          npx -y -p typescript tsc -p tsconfig.ci.json --noEmit
 
       - name: Build & Start API
         working-directory: apps/web

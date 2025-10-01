@@ -14,10 +14,7 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
 
-    // JSX для Next сохраняем как есть (обработает next/babel),
-    // но добавляем типы react, чтобы не было ошибок JSX.IntrinsicElements
     "jsx": "preserve",
-    "types": ["node", "react", "react-dom"],
 
     "incremental": true,
     "baseUrl": ".",
@@ -25,7 +22,10 @@
       "@/*": ["./src/*"],
       "@lib/*": ["./src/lib/*"]
     },
-    "plugins": [{ "name": "next" }]
+    "plugins": [{ "name": "next" }],
+
+    /* важно: пусть tsc ищет типы и тут, и на уровень выше (вдруг они захостятся в корне) */
+    "typeRoots": ["./node_modules/@types", "../node_modules/@types", "../../node_modules/@types"]
   },
   "include": [
     "next-env.d.ts",
@@ -35,15 +35,10 @@
   ],
   "exclude": [
     "node_modules",
-    // apps/web/scripts/** (не нужно tsc)
     "scripts",
-    // исторические ручки
     "src/app/api/_archive/**",
-    // старые RAG ручки
     "src/app/api/rag/**",
-    // старые memories ручки
     "src/app/api/memory/**",
-    // старое ядро RAG (не используется)
     "src/lib/rag-core.ts"
   ]
 }

@@ -2,9 +2,10 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "typeRoots": ["./node_modules/@types", "../node_modules/@types", "../../node_modules/@types"]
   },
   "files": [
-    "ci.d.ts"
+    "next-env.d.ts"
   ]
 }
