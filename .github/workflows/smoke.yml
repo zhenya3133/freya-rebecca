@@ -1,12 +1,13 @@
 name: Smoke
 on:
   push:
-    branches: [ main, develop, feature/** ]
+    branches: [ main, develop, feature/**, feat/**, fix/** ]
   pull_request:
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
+
     services:
       pg:
         image: pgvector/pgvector:pg16
@@ -20,6 +21,7 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+
     env:
       DATABASE_URL: postgres://rebecca:rebecca@localhost:5432/rebecca?sslmode=disable
       X_ADMIN_KEY: test-admin
@@ -34,16 +36,18 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: apps/web/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            apps/web/package-lock.json
 
-      - name: Install deps (apps/web only)
+      # ВАЖНО: используем `npm install`, а не `npm ci`.
+      # `npm ci` требует валидный lock, а у тебя он часто отсутствует/ломается.
+      - name: Install deps (root)
+        run: npm install --no-audit --no-fund
+
+      - name: Install deps (apps/web)
         working-directory: apps/web
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install --no-audit --no-fund
-          fi
+        run: npm install --no-audit --no-fund
 
       - name: Init DB schema
         run: |
@@ -74,8 +78,7 @@ jobs:
           SQL
 
       - name: Typecheck
-        working-directory: apps/web
-        run: npx -y -p typescript tsc -p tsconfig.ci.json --noEmit
+        run: npx -y -p typescript tsc -p apps/web/tsconfig.ci.json --noEmit
 
       - name: Build & Start API
         working-directory: apps/web
