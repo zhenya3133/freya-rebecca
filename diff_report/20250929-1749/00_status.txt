@@ -1,0 +1,19 @@
+## feature/ingest-text-desktop...origin/feature/ingest-text-desktop
+ M .gitignore
+ M apps/web/scripts/ingest_from_desktop.sh
+ M package.json
+?? apps/web/scripts/smoke_desktop_ingest.sh
+?? apps/web/scripts/watch_desktop.sh
+?? diff_report/
+?? docs/AUDIT.md
+?? docs/Desktop-Ingest-README.md
+?? docs/deps.txt
+?? docs/import_graph.dot
+?? docs/import_graph.png
+?? docs/recent_docs.tsv
+?? docs/routes.txt
+?? docs/slices/
+?? docs/tree.txt
+?? scripts/audit_everything.sh
+?? scripts/audit_read_and_plan.sh
+?? scripts/make_diff_report.sh

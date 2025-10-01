@@ -1,0 +1,9 @@
+./docs/retrieve-api.md:# /api/retrieve — мини-README
+./scripts/contract/test_retrieve.sh:resp_valid="$(curl -sS -X POST "$BASE/api/retrieve" -H 'content-type: application/json' -d "$valid")" || fail "valid POST failed (curl)"
+./scripts/contract/test_retrieve.sh:resp_invalid="$(curl -sS -X POST "$BASE/api/retrieve" -H 'content-type: application/json' -d "$invalid" || true)"
+./scripts/contract/test_retrieve.sh:resp_domain="$(curl -sS -X POST "$BASE/api/retrieve" -H 'content-type: application/json' -d "$with_domain")" || fail "domain POST failed"
+./scripts/evals/run_eval.mjs:// Node >=18 (встроенный fetch). Читает JSONL кейсы, бьет /api/retrieve, считает hit@k и MRR.
+./scripts/evals/run_eval.mjs:// одно обращение к /api/retrieve
+./scripts/evals/run_eval.mjs:  const r = await fetch(`${BASE}/api/retrieve`, {
+./scripts/evals/run_eval.ts:  const res = await fetch(`${BASE}/api/retrieve`, {
+./src/app/api/retrieve/route.ts:// apps/web/src/app/api/retrieve/route.ts

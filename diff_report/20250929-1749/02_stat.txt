@@ -1,0 +1,241 @@
+ .gitattributes                                     |    0
+ .github/PULL_REQUEST_TEMPLATE.md                   |   12 +
+ .github/workflows/ci.yml                           |   79 +
+ .gitignore                                         |   16 +
+ Makefile                                           |  126 +
+ apps/web/.editorconfig                             |   11 +
+ apps/web/.eslintrc.json                            |    0
+ apps/web/.gitignore                                |    0
+ apps/web/.vscode/extensions.json                   |   19 +
+ apps/web/.vscode/settings.json                     |   22 +
+ apps/web/Dockerfile                                |    9 +
+ apps/web/Ping-4O.ps1                               |    0
+ apps/web/README.md                                 |    0
+ apps/web/Run-Rag.backup.ps1                        |    0
+ apps/web/Run-Rag.ps1                               |    0
+ apps/web/Sync-Memory.ps1                           |    0
+ apps/web/agents.prod.json                          |    0
+ apps/web/answer.json                               |    0
+ apps/web/ask.json                                  |    0
+ apps/web/docs/CHANGELOG.md                         |    0
+ apps/web/docs/data-lifecycle.md                    |   40 +
+ apps/web/docs/evals/latest.md                      |   13 +
+ apps/web/docs/retrieve-api.md                      |   15 +
+ apps/web/eslint.config.mjs                         |    0
+ apps/web/ffmpeg-bootstrap.js                       |    8 +
+ apps/web/freya-rebecca-v0.4.0.bundle               |  Bin
+ apps/web/middleware.ts                             |    0
+ apps/web/migrations/2025-08-27_rag_logs.sql        |    0
+ apps/web/next.config.mjs                           |    0
+ apps/web/package.json                              |   43 +-
+ .../web/patches/0001-release-main-29.08.2025.patch |    0
+ apps/web/public/file.svg                           |    0
+ apps/web/public/globe.svg                          |    0
+ apps/web/public/next.svg                           |    0
+ apps/web/public/vercel.svg                         |    0
+ apps/web/public/window.svg                         |    0
+ apps/web/resp-gpt5.json                            |    0
+ apps/web/retrieve_grep_output.txt                  |    9 +
+ apps/web/scripts/audit-state.mjs                   |    0
+ apps/web/scripts/ci_smoke.sh                       |   96 +
+ apps/web/scripts/contract/test_retrieve.sh         |   22 +
+ apps/web/scripts/db/maintenance.sh                 |    4 +
+ apps/web/scripts/db/maintenance.sql                |    5 +
+ apps/web/scripts/diag/count_chunks.sql             |    6 +
+ apps/web/scripts/diag/count_chunks_ns.ts           |   26 +
+ apps/web/scripts/diag/count_memories.sql           |    9 +
+ apps/web/scripts/diag/count_memories_ns.ts         |   26 +
+ apps/web/scripts/diag/count_ns.sql                 |   34 +
+ apps/web/scripts/diag/count_ns.ts                  |   31 +
+ apps/web/scripts/diag/list_columns.sh              |   19 +
+ apps/web/scripts/diag/list_columns.sql             |   15 +
+ apps/web/scripts/diag/list_columns.ts              |   27 +
+ apps/web/scripts/diag/list_tables.sh               |   13 +
+ apps/web/scripts/diag/list_tables.sql              |    8 +
+ apps/web/scripts/diag/slots_by_ns.ts               |   24 +
+ apps/web/scripts/diag/top_ns.ts                    |   31 +
+ apps/web/scripts/e2e/bootstrap_demo.sh             |  109 +
+ apps/web/scripts/embed_backfill.sh                 |   40 +
+ .../scripts/evals/golden/rebecca_army_refs.jsonl   |    8 +
+ apps/web/scripts/evals/run_eval.mjs                |  133 +
+ apps/web/scripts/evals/run_eval.ts                 |  144 +
+ apps/web/scripts/evals/sample_cases.jsonl          |    5 +
+ apps/web/scripts/ingest_from_desktop.sh            |  101 +
+ apps/web/scripts/ingest_github.sh                  |   83 +
+ apps/web/scripts/ingest_github_paged.sh            |  161 +
+ apps/web/scripts/ingest_many.sh                    |   61 +
+ apps/web/scripts/ingest_pdf.sh                     |   63 +
+ apps/web/scripts/ingest_pdf_file.sh                |   66 +
+ apps/web/scripts/ingest_readme_pdfs.sh             |   59 +
+ apps/web/scripts/ingest_url.sh                     |   21 +
+ apps/web/scripts/ingest_youtube.sh                 |   98 +
+ apps/web/scripts/ingest_youtube_via_seed.sh        |  213 +
+ .../ingest_youtube_via_seed_whisper_only.sh        |  140 +
+ apps/web/scripts/migrate-g0.js                     |    0
+ apps/web/scripts/migrate.sh                        |   37 +
+ .../migrations/20250927_content_hash_unique.sql    |   32 +
+ apps/web/scripts/migrations/G0_init.sql            |   24 +
+ apps/web/scripts/migrations/G5_indexes_upserts.sql |   17 +
+ .../migrations/G6_make_embedding_nullable.sql      |    2 +
+ .../g5_backfill_chunks_from_memories.sql           |   19 +
+ apps/web/scripts/retrieve.sh                       |   98 +
+ apps/web/scripts/run_admin_sql.sh                  |   22 +
+ apps/web/scripts/smoke_pdf.sh                      |   49 +
+ apps/web/seed.json                                 |    0
+ apps/web/seeds/agents/rebecca.core.v1.json         |    0
+ apps/web/seeds/army/seed.json                      |    0
+ apps/web/seeds/profiles/analyst.json               |    0
+ apps/web/seeds/profiles/docs.json                  |    0
+ apps/web/seeds/profiles/qa.json                    |    0
+ apps/web/seeds/profiles/rag.json                   |    0
+ apps/web/seeds/profiles/rebecca.profiles.v1.json   |    0
+ apps/web/seeds/profiles/security.json              |    0
+ apps/web/seeds/profiles/toolsmith.json             |    0
+ apps/web/seeds/rebecca/01-architecture.md          |    0
+ apps/web/seeds/rebecca/02-rag-pipeline.md          |    0
+ apps/web/seeds/rebecca/03-prompts-style.md         |    0
+ apps/web/seeds/rebecca/04-kb-curation.md           |    0
+ apps/web/seeds/refs/agents/autogen.md              |    0
+ apps/web/seeds/refs/agents/crewai.md               |    0
+ apps/web/seeds/refs/agents/guardrails.md           |    0
+ apps/web/seeds/refs/agents/langgraph.md            |    0
+ apps/web/seeds/refs/agents/llamaindex.md           |    0
+ apps/web/seeds/refs/agents/openai-agents.md        |    0
+ apps/web/seeds/refs/seed.json                      |    0
+ apps/web/src/app/admin/ingest/page.tsx             |    0
+ apps/web/src/app/admin/logs/page.tsx               |    0
+ apps/web/src/app/admin/memory/page.tsx             |    0
+ apps/web/src/app/admin/playground/page.tsx         |    0
+ apps/web/src/app/admin/profiles/page.tsx           |    0
+ apps/web/src/app/admin/traces/page.tsx             |    0
+ .../20250914-235609/freya-initiative/route.ts      |    0
+ .../20250914-235609/memory-import/github/route.ts  |    0
+ .../20250914-235609/memory-import/plain/route.ts   |    0
+ apps/web/src/app/api/admin/echo/route.ts           |    0
+ apps/web/src/app/api/admin/embed-backfill/route.ts |   90 +
+ apps/web/src/app/api/admin/logs/list/route.ts      |    0
+ apps/web/src/app/api/admin/sql/route.ts            |   14 +-
+ apps/web/src/app/api/admin/whoami/route.ts         |    0
+ apps/web/src/app/api/agents/save/route.ts          |    0
+ apps/web/src/app/api/debug/admin/route.ts          |    0
+ apps/web/src/app/api/debug/env/route.ts            |   11 +
+ apps/web/src/app/api/debug/logs/route.ts           |    0
+ apps/web/src/app/api/dev/db/create-logs/route.ts   |    0
+ apps/web/src/app/api/diag/chunks/route.ts          |    0
+ apps/web/src/app/api/diag/emb-ping/route.ts        |    0
+ apps/web/src/app/api/diag/gh-rate/route.ts         |    0
+ apps/web/src/app/api/diag/github/route.ts          |    0
+ apps/web/src/app/api/diag/llm/route.ts             |    0
+ apps/web/src/app/api/diag/mem-stats/route.ts       |    0
+ apps/web/src/app/api/diag/wipe-ns/route.ts         |    0
+ apps/web/src/app/api/evals/smoke/route.ts          |    0
+ apps/web/src/app/api/evals/trace/route.ts          |    0
+ apps/web/src/app/api/evals/traces/export/route.ts  |    0
+ apps/web/src/app/api/evals/traces/route.ts         |    0
+ apps/web/src/app/api/health/db/route.ts            |    0
+ apps/web/src/app/api/health/env/route.ts           |    0
+ apps/web/src/app/api/ingest/github/route.ts        |  436 +-
+ apps/web/src/app/api/ingest/pdf/route.ts           |  204 +-
+ apps/web/src/app/api/ingest/seed/route.ts          |  158 +-
+ apps/web/src/app/api/ingest/url/route.ts           |  198 +-
+ apps/web/src/app/api/ingest/youtube/route.ts       |  228 +-
+ apps/web/src/app/api/initiatives/recent/route.ts   |    0
+ apps/web/src/app/api/logs/list/route.ts            |    0
+ apps/web/src/app/api/memory/delete/route.ts        |    0
+ apps/web/src/app/api/memory/ingest/route.ts        |    0
+ apps/web/src/app/api/memory/list/route.ts          |    0
+ apps/web/src/app/api/memory/promote/route.ts       |    0
+ apps/web/src/app/api/memory/route.ts               |    0
+ apps/web/src/app/api/memory/search/route.ts        |    0
+ apps/web/src/app/api/memory/suggest-ns/route.ts    |    0
+ apps/web/src/app/api/memory/upsert/route.ts        |    0
+ apps/web/src/app/api/ns/route.ts                   |    0
+ apps/web/src/app/api/profiles/delete/route.ts      |    0
+ apps/web/src/app/api/profiles/get/route.ts         |    0
+ apps/web/src/app/api/profiles/save/route.ts        |    0
+ apps/web/src/app/api/rag/answer-guarded/route.ts   |    0
+ .../src/app/api/rag/answer-logged-guarded/route.ts |    0
+ apps/web/src/app/api/rag/answer-logged/route.ts    |    0
+ apps/web/src/app/api/rag/answer/route.ts           |    0
+ apps/web/src/app/api/rag/ask-guarded/route.ts      |    0
+ apps/web/src/app/api/rag/ask/route.ts              |    0
+ apps/web/src/app/api/rebecca/execute/route.ts      |    0
+ apps/web/src/app/api/retrieve/route.ts             |   80 +-
+ apps/web/src/app/api/schema/columns/route.ts       |    0
+ apps/web/src/app/chat/page.tsx                     |    0
+ apps/web/src/app/favicon.ico                       |  Bin
+ apps/web/src/app/globals.css                       |    0
+ apps/web/src/app/icon.svg                          |    0
+ apps/web/src/app/layout.tsx                        |    0
+ apps/web/src/app/page.module.css                   |    0
+ apps/web/src/app/page.tsx                          |    0
+ apps/web/src/app/playground/page.tsx               |    0
+ apps/web/src/lib/admin-auth.ts                     |    0
+ apps/web/src/lib/admin-guard.ts                    |    0
+ apps/web/src/lib/admin.ts                          |   21 +
+ apps/web/src/lib/adminAuth.ts                      |    0
+ apps/web/src/lib/auth.ts                           |    0
+ apps/web/src/lib/chunk.ts                          |    0
+ apps/web/src/lib/chunking.ts                       |    0
+ apps/web/src/lib/contracts.ts                      |    0
+ apps/web/src/lib/db.ts                             |    0
+ apps/web/src/lib/domain_filter.ts                  |   20 +
+ apps/web/src/lib/embeddings.ts                     |    0
+ apps/web/src/lib/env.ts                            |    0
+ apps/web/src/lib/guardrails.ts                     |    0
+ apps/web/src/lib/hash.ts                           |   13 +
+ apps/web/src/lib/ingest_upsert.ts                  |  246 +
+ apps/web/src/lib/log.ts                            |    0
+ apps/web/src/lib/logs.ts                           |    0
+ apps/web/src/lib/namespaces.ts                     |    0
+ apps/web/src/lib/ns.ts                             |    0
+ apps/web/src/lib/pg.ts                             |   31 +
+ apps/web/src/lib/profile-runtime.ts                |    0
+ apps/web/src/lib/profiles.ts                       |    0
+ apps/web/src/lib/rag-core.ts                       |    0
+ apps/web/src/lib/rate_limit.ts                     |    0
+ apps/web/src/lib/recency.ts                        |    0
+ apps/web/src/lib/redact.ts                         |    0
+ apps/web/src/lib/retrieval-contract.ts             |   40 +
+ apps/web/src/lib/retriever.ts                      |    0
+ apps/web/src/lib/retriever_v2.backup.ts            |  126 -
+ apps/web/src/lib/retriever_v2.ts                   |  343 +-
+ apps/web/src/lib/retryFetch.ts                     |   32 +
+ apps/web/src/lib/schemas/agent.ts                  |    0
+ apps/web/src/lib/similarity.ts                     |    0
+ apps/web/src/lib/sleep.ts                          |    5 +
+ apps/web/src/lib/suggestNs.ts                      |    0
+ apps/web/src/types/ambient.d.ts                    |   12 +
+ apps/web/tests/Smoke-Evals.ps1                     |    0
+ apps/web/tests/golden.json                         |    0
+ apps/web/traces.csv                                |    0
+ apps/web/tsconfig.backup.json                      |    0
+ apps/web/tsconfig.json                             |   40 +-
+ apps/web/urls.txt                                  |    3 +
+ audit-foundation.txt                               |  518 +
+ docker-compose.yml                                 |   42 +
+ docs/CHANGELOG.md                                  |    0
+ docs/manus/API_CONTRACT.md                         |   33 +
+ docs/manus/VISION.md                               |    8 +
+ env-check.ps1                                      |    0
+ logs/db_ping.json                                  |    4 +
+ logs/git_diff_stat.txt                             |   12 +
+ logs/git_log.txt                                   |    1 +
+ logs/ingest_github.json                            |   16 +
+ logs/ingest_pdf.json                               |    9 +
+ logs/ingest_url.json                               |   19 +
+ logs/pr_body.md                                    |  181 +
+ logs/retrieve_compact.json                         |   34 +
+ logs/retrieve_full.json                            |   44 +
+ package-lock.json                                  |  309 +-
+ scripts/audit_foundation.sh                        |   73 +
+ scripts/bootstrap_roadmap.sh                       |  225 +
+ scripts/ingest_from_desktop.sh                     |  108 +
+ scripts/ingest_github_paged.sh                     |   76 -
+ scripts/repair_published_at.sh                     |    0
+ seed1.json                                         |   19 +
+ seed_chunks.json                                   |   33 +
+ seed_long.json                                     |   34 +
+ tree.txt                                           | 9852 ++++++++++++++++++++
+ youtube_ingest_diag.tar.gz                         |  Bin 0 -> 10101 bytes
+ 240 files changed, 15705 insertions(+), 919 deletions(-)

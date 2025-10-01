@@ -1,0 +1,145 @@
+.
+├── .gitattributes
+├── .github
+│   ├── PULL_REQUEST_TEMPLATE.md
+│   └── workflows
+│       └── ci.yml
+├── .gitignore
+├── Makefile
+├── _manus_pack
+│   └── .env.local.example
+├── apps
+│   └── web
+│       ├── .editorconfig
+│       ├── .env.example
+│       ├── .env.local
+│       ├── .env.local.example
+│       ├── .eslintrc.json
+│       ├── .gitignore
+│       ├── .ingest_checkpoints
+│       ├── .vscode
+│       │   ├── extensions.json
+│       │   └── settings.json
+│       ├── Dockerfile
+│       ├── Ping-4O.ps1
+│       ├── README.md
+│       ├── Run-Rag.backup.ps1
+│       ├── Run-Rag.ps1
+│       ├── Sync-Memory.ps1
+│       ├── _sanity_bundle
+│       │   └── .env.redacted
+│       ├── agents.prod.json
+│       ├── answer.json
+│       ├── ask.json
+│       ├── docs
+│       │   ├── CHANGELOG.md
+│       │   ├── data-lifecycle.md
+│       │   ├── evals
+│       │   └── retrieve-api.md
+│       ├── eslint.config.mjs
+│       ├── ffmpeg-bootstrap.js
+│       ├── freya-rebecca-v0.4.0.bundle
+│       ├── logs
+│       ├── middleware.ts
+│       ├── migrations
+│       │   └── 2025-08-27_rag_logs.sql
+│       ├── next-env.d.ts
+│       ├── next.config.mjs
+│       ├── package.json
+│       ├── patches
+│       │   └── 0001-release-main-29.08.2025.patch
+│       ├── public
+│       │   ├── file.svg
+│       │   ├── globe.svg
+│       │   ├── next.svg
+│       │   ├── vercel.svg
+│       │   └── window.svg
+│       ├── resp-gpt5.json
+│       ├── retrieve_grep_output.txt
+│       ├── scripts
+│       │   ├── audit-state.mjs
+│       │   ├── ci_smoke.sh
+│       │   ├── contract
+│       │   ├── db
+│       │   ├── diag
+│       │   ├── e2e
+│       │   ├── embed_backfill.sh
+│       │   ├── evals
+│       │   ├── ingest_from_desktop.sh
+│       │   ├── ingest_github.sh
+│       │   ├── ingest_github_paged.sh
+│       │   ├── ingest_many.sh
+│       │   ├── ingest_pdf.sh
+│       │   ├── ingest_pdf_file.sh
+│       │   ├── ingest_readme_pdfs.sh
+│       │   ├── ingest_url.sh
+│       │   ├── ingest_youtube.sh
+│       │   ├── ingest_youtube_via_seed.sh
+│       │   ├── ingest_youtube_via_seed_whisper_only.sh
+│       │   ├── migrate-g0.js
+│       │   ├── migrate.sh
+│       │   ├── migrations
+│       │   ├── retrieve.sh
+│       │   ├── run_admin_sql.sh
+│       │   └── smoke_pdf.sh
+│       ├── seed.json
+│       ├── seeds
+│       │   ├── agents
+│       │   ├── army
+│       │   ├── profiles
+│       │   ├── rebecca
+│       │   └── refs
+│       ├── src
+│       │   ├── app
+│       │   ├── lib
+│       │   └── types
+│       ├── tests
+│       │   ├── Smoke-Evals.ps1
+│       │   └── golden.json
+│       ├── traces.csv
+│       ├── tsconfig.backup.json
+│       ├── tsconfig.json
+│       ├── tsconfig.tsbuildinfo
+│       └── urls.txt
+├── audit-foundation.txt
+├── docker-compose.yml
+├── docs
+│   ├── AUDIT.md
+│   ├── CHANGELOG.md
+│   ├── deps.txt
+│   ├── import_graph.dot
+│   ├── import_graph.png
+│   ├── manus
+│   │   ├── API_CONTRACT.md
+│   │   └── VISION.md
+│   ├── recent_docs.tsv
+│   ├── routes.txt
+│   └── tree.txt
+├── env-check.ps1
+├── logs
+│   ├── db_ping.json
+│   ├── git_diff_stat.txt
+│   ├── git_log.txt
+│   ├── ingest_github.json
+│   ├── ingest_pdf.json
+│   ├── ingest_url.json
+│   ├── pr_body.md
+│   ├── retrieve_compact.json
+│   └── retrieve_full.json
+├── package-lock.json
+├── package.json
+├── packages
+├── scripts
+│   ├── audit_everything.sh
+│   ├── audit_foundation.sh
+│   ├── audit_read_and_plan.sh
+│   ├── bootstrap_roadmap.sh
+│   ├── ingest_from_desktop.sh
+│   └── repair_published_at.sh
+├── seed1.json
+├── seed_chunks.json
+├── seed_long.json
+├── tree.txt
+└── youtube_ingest_diag.tar.gz
+
+38 directories, 105 files

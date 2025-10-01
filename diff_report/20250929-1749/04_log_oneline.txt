@@ -1,0 +1,15 @@
+44f13b4 (HEAD -> feature/ingest-text-desktop, origin/feature/ingest-text-desktop) chore: freeze YouTube ingest (503 stub); switch Next dev off turbopack; seed+OCR pipeline; add whisper-only & desktop ingest scripts; next: folder monitor
+745c6f0 B-2 stable: auth fixed, OCR ingest working, desktop pipeline OK; remove debug endpoints
+aca4718 B-2: Desktop ingest (.doc/.docx/.pdf -> txt -> chunk 1200/120 -> seed -> backfill); auth self-check
+90cfe18 B-2: desktop .doc/.docx ingest → txt → chunk(1200/120) → /api/ingest/seed → embeddings backfill; stable source_id
+7ac47ad (tag: v0.4-rcv1-checkpoint, origin/feat/github-ingest, feat/github-ingest) ingest: add PDF+URL flow w/ unchanged detection & backfill; GitHub ingest w/ pagination, includeExt/path filters, dryRun/skipEmbeddings; helper scripts
+ae21254 (origin/for-manus, for-manus) fix(retrieve): drop contract import of clamp; add local clamp + safe defaults for topK/candidateK/minSimilarity
+b9b57b0 feat: Implement /api/retrieve endpoint compliance and robustness features
+cda5b43 docs(manus): vision, API contract, full manus pack; docker-compose + env example
+e058bfb (fix/stabilize-rcv1) wip: snapshot before stabilization
+f0c74ba (origin/chore/restore-missing, chore/restore-missing) chore(perms): normalize non-executable file modes
+6796af8 chore(restore): restore CI, scripts, docs; mark scripts executable
+b84f6dd (chore/repo-clean) Merge remote-tracking branch 'origin/feat/retrieve-v2-domain-filter' into chore/repo-clean
+12bc4af (origin/feat/retrieve-v2-domain-filter, backup/pre-clean) retriever_v2: RC v1, ns strict/prefix, SQL domain filter, calibrated candidateK/topK
+45689f7 chore(vscode): workspace settings & recommendations
+72a39c2 feat(retrieve): enforce topK in route; domainFilter allow/deny (+subdomains); recency mix + debugVersion
