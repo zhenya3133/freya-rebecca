@@ -1,17 +1,24 @@
 {
   "name": "freya-rebecca",
   "private": true,
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "web:dev": "npm --workspace apps/web run dev",
     "web:build": "npm --workspace apps/web run build",
     "web:start": "npm --workspace apps/web run start",
-
     "db:start": "docker run --name freya-pg -e POSTGRES_USER=freya -e POSTGRES_PASSWORD=freya -e POSTGRES_DB=freya -p 5432:5432 -d postgres:15-alpine",
     "db:stop": "docker rm -f freya-pg || true",
-
     "db:migrate": "bash scripts/migrate.sh",
     "smoke": "bash scripts/ci_smoke.sh",
     "smoke:desktop": "bash apps/web/scripts/smoke_desktop_ingest.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.1",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
+    "typescript": "^5.9.3"
   }
 }

@@ -4,14 +4,21 @@
     "lib": ["dom", "dom.iterable", "esnext"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+
     "strict": true,
     "noEmit": true,
+
     "allowJs": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+
+    // JSX для Next сохраняем как есть (обработает next/babel),
+    // но добавляем типы react, чтобы не было ошибок JSX.IntrinsicElements
     "jsx": "preserve",
+    "types": ["node", "react", "react-dom"],
+
     "incremental": true,
     "baseUrl": ".",
     "paths": {
@@ -28,10 +35,15 @@
   ],
   "exclude": [
     "node_modules",
-    "scripts",                         // apps/web/scripts/** (не нужно tsc)
-    "src/app/api/_archive/**",         // исторические ручки
-    "src/app/api/rag/**",              // старые RAG ручки
-    "src/app/api/memory/**",           // старые memories ручки
-    "src/lib/rag-core.ts"              // старое ядро RAG (не используется)
+    // apps/web/scripts/** (не нужно tsc)
+    "scripts",
+    // исторические ручки
+    "src/app/api/_archive/**",
+    // старые RAG ручки
+    "src/app/api/rag/**",
+    // старые memories ручки
+    "src/app/api/memory/**",
+    // старое ядро RAG (не используется)
+    "src/lib/rag-core.ts"
   ]
 }

@@ -1,0 +1,85 @@
+name: Smoke
+on:
+  push:
+    branches: [ main, develop, feature/** ]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    services:
+      pg:
+        image: pgvector/pgvector:pg16
+        ports: ['5432:5432']
+        env:
+          POSTGRES_USER: rebecca
+          POSTGRES_PASSWORD: rebecca
+          POSTGRES_DB: rebecca
+        options: >-
+          --health-cmd "pg_isready -U rebecca -d rebecca"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://rebecca:rebecca@localhost:5432/rebecca?sslmode=disable
+      X_ADMIN_KEY: test-admin
+      NEXT_PUBLIC_BASE_URL: http://localhost:3000
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install deps
+        run: |
+          npm ci
+          cd apps/web && npm ci
+
+      - name: Init DB schema
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client jq
+          psql "$DATABASE_URL" -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+          # минимальная схема RC-v1 (совместима с твоим локальным инстансом)
+          psql "$DATABASE_URL" <<'SQL'
+          CREATE TABLE IF NOT EXISTS docs (
+            id bigserial PRIMARY KEY, ns text NOT NULL, slot text NOT NULL, source_id text NOT NULL,
+            title text, url text, meta jsonb DEFAULT '{}'::jsonb, created_at timestamptz DEFAULT now()
+          );
+          CREATE TABLE IF NOT EXISTS sources (
+            id bigserial PRIMARY KEY, ns text NOT NULL, slot text NOT NULL, source_id text UNIQUE NOT NULL,
+            url text, meta jsonb DEFAULT '{}'::jsonb, created_at timestamptz DEFAULT now()
+          );
+          CREATE TABLE IF NOT EXISTS chunks (
+            id bigserial PRIMARY KEY,
+            ns text NOT NULL, slot text NOT NULL, source_id text, chunk_no integer,
+            content text NOT NULL, content_hash text,
+            url text, title text, snippet text,
+            published_at timestamptz, updated_at timestamptz DEFAULT now(),
+            source_type text, kind text,
+            metadata jsonb DEFAULT '{}'::jsonb,
+            embedding vector(1536),
+            created_at timestamptz DEFAULT now(),
+            UNIQUE (ns,slot,source_id,chunk_no)
+          );
+          CREATE INDEX IF NOT EXISTS idx_chunks_ns_slot ON chunks(ns,slot);
+          SQL
+
+      - name: Typecheck
+        run: cd apps/web && npx tsc -v && npx tsc --noEmit
+
+      - name: Build & Start API
+        run: |
+          cd apps/web
+          npm run build
+          npm run start &  # Next.js prod server
+          echo "waiting for API..."
+          for i in {1..60}; do curl -sSf http://localhost:3000/api/db-ping && break || sleep 2; done
+
+      - name: Smoke PDF
+        run: |
+          chmod +x scripts/smoke_pdf.sh
+          BASE=http://localhost:3000 NS=rebecca/army/refs SLOT=staging X_ADMIN_KEY=$X_ADMIN_KEY ./scripts/smoke_pdf.sh
