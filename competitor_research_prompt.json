@@ -99,69 +99,212 @@
         "What adjacent markets are being explored?"
       ],
       "expected_output": "Market trends and future predictions"
+    },
+    {
+      "id": 9,
+      "question": "CIS MARKET SPECIFIC: Who serves Russia/Belarus/Kazakhstan/CIS with AI agents?",
+      "priority": "CRITICAL",
+      "sub_questions": [
+        "Which Russian companies (Yandex, Sber, etc) offer business AI agents?",
+        "What is their market penetration in CIS?",
+        "Do they use proprietary models or license from abroad?",
+        "Can western companies legally serve these markets?",
+        "What is the competitive landscape in Kazakhstan specifically?",
+        "Are there local system integrators offering AI solutions?",
+        "What are pricing expectations in these markets (purchasing power)?",
+        "What are unique requirements (language, compliance, data sovereignty)?"
+      ],
+      "expected_output": "Comprehensive analysis of CIS competitive landscape - this is WHERE WE WILL COMPETE, so detailed intelligence critical!"
     }
   ],
 
   "key_competitors_to_investigate": [
     {
-      "name": "Sierra",
-      "website": "https://sierra.ai",
-      "known_info": "Raised $110M, focused on customer service agents",
-      "priority": "high"
+      "category": "Western Competitors (CAN'T serve CIS markets)",
+      "competitors": [
+        {
+          "name": "Sierra",
+          "website": "https://sierra.ai",
+          "known_info": "Raised $110M, focused on customer service agents",
+          "priority": "high",
+          "cis_presence": "NO - sanctions, uses OpenAI API"
+        },
+        {
+          "name": "Decagon",
+          "website": "https://decagon.ai",
+          "known_info": "Raised $35M, support automation",
+          "priority": "high",
+          "cis_presence": "NO - sanctions"
+        },
+        {
+          "name": "Dust",
+          "website": "https://dust.tt",
+          "known_info": "Raised $16M, team AI agents",
+          "priority": "high",
+          "cis_presence": "NO - EU-based but follows sanctions"
+        },
+        {
+          "name": "Relevance AI",
+          "website": "https://relevanceai.com",
+          "known_info": "Raised $15M, agent building platform",
+          "priority": "high",
+          "cis_presence": "NO"
+        },
+        {
+          "name": "Agent.ai",
+          "website": "https://agent.ai",
+          "known_info": "Sales automation focus",
+          "priority": "medium",
+          "cis_presence": "NO"
+        },
+        {
+          "name": "Embra",
+          "website": "https://embra.ai",
+          "known_info": "Raised $5M, personal AI assistant",
+          "priority": "medium",
+          "cis_presence": "NO"
+        },
+        {
+          "name": "Factory",
+          "website": "https://factory.ai",
+          "known_info": "Coding agents",
+          "priority": "low",
+          "cis_presence": "NO"
+        },
+        {
+          "name": "Devin (Cognition AI)",
+          "website": "https://cognition-labs.com",
+          "known_info": "AI software engineer",
+          "priority": "low",
+          "cis_presence": "NO"
+        },
+        {
+          "name": "Harvey",
+          "website": "https://harvey.ai",
+          "known_info": "Legal AI agents",
+          "priority": "medium",
+          "cis_presence": "NO"
+        },
+        {
+          "name": "Glean",
+          "website": "https://glean.com",
+          "known_info": "Enterprise AI assistant",
+          "priority": "medium",
+          "cis_presence": "NO"
+        }
+      ]
     },
     {
-      "name": "Decagon",
-      "website": "https://decagon.ai",
-      "known_info": "Raised $35M, support automation",
-      "priority": "high"
+      "category": "CIS/Russian Competitors (CRITICAL TO RESEARCH)",
+      "note": "These are our REAL competitors for CIS markets!",
+      "competitors": [
+        {
+          "name": "Yandex GPT / YaLM",
+          "website": "https://yandex.com/gpt",
+          "known_info": "Russian LLM, integrated in Yandex services",
+          "priority": "CRITICAL",
+          "cis_presence": "YES - dominant in Russia",
+          "research_focus": "Do they offer business automation agents? B2B solution?"
+        },
+        {
+          "name": "Sber GigaChat",
+          "website": "https://developers.sber.ru/gigachat",
+          "known_info": "Sberbank's LLM, Russian market",
+          "priority": "CRITICAL",
+          "cis_presence": "YES - major Russian bank",
+          "research_focus": "Agent solutions for businesses? Pricing?"
+        },
+        {
+          "name": "SberDevices / Salute",
+          "website": "https://salute.sber.ru",
+          "known_info": "Sber's AI assistant ecosystem",
+          "priority": "HIGH",
+          "cis_presence": "YES - Russia",
+          "research_focus": "Business agent offerings? B2B focus?"
+        },
+        {
+          "name": "Just AI",
+          "website": "https://just-ai.com",
+          "known_info": "Russian conversational AI platform",
+          "priority": "HIGH",
+          "cis_presence": "YES - Russia, some CIS",
+          "research_focus": "Full agent automation? Clone approach?"
+        },
+        {
+          "name": "Aimylogic",
+          "website": "https://aimylogic.com",
+          "known_info": "Chatbot platform, Russian",
+          "priority": "MEDIUM",
+          "cis_presence": "YES - Russia",
+          "research_focus": "Agent capabilities? Industry adapters?"
+        },
+        {
+          "name": "Naumen",
+          "website": "https://www.naumen.ru",
+          "known_info": "Russian enterprise software with AI features",
+          "priority": "MEDIUM",
+          "cis_presence": "YES - Russia, Kazakhstan",
+          "research_focus": "AI agent solutions? Business automation?"
+        },
+        {
+          "name": "Neuronet (NTechLab)",
+          "website": "https://ntechlab.com",
+          "known_info": "Russian AI company",
+          "priority": "LOW",
+          "cis_presence": "YES - Russia",
+          "research_focus": "Any business agents?"
+        }
+      ]
     },
     {
-      "name": "Embra",
-      "website": "https://embra.ai",
-      "known_info": "Raised $5M, personal AI assistant",
-      "priority": "medium"
+      "category": "Kazakhstan Competitors",
+      "note": "Local players in priority market",
+      "competitors": [
+        {
+          "name": "Kaspi AI",
+          "website": "https://kaspi.kz",
+          "known_info": "Kaspi.kz internal AI efforts",
+          "priority": "HIGH",
+          "cis_presence": "Kazakhstan only",
+          "research_focus": "Are they building agents? For internal use only or B2B?"
+        },
+        {
+          "name": "Local system integrators",
+          "website": "Research needed",
+          "known_info": "Who provides AI/automation in Kazakhstan?",
+          "priority": "MEDIUM",
+          "research_focus": "Survey of KZ market: who offers AI agents?"
+        }
+      ]
     },
     {
-      "name": "Dust",
-      "website": "https://dust.tt",
-      "known_info": "Raised $16M, team AI agents",
-      "priority": "high"
-    },
-    {
-      "name": "Relevance AI",
-      "website": "https://relevanceai.com",
-      "known_info": "Raised $15M, agent building platform",
-      "priority": "high"
-    },
-    {
-      "name": "Agent.ai",
-      "website": "https://agent.ai",
-      "known_info": "Sales automation focus",
-      "priority": "medium"
-    },
-    {
-      "name": "Factory",
-      "website": "https://factory.ai",
-      "known_info": "Coding agents",
-      "priority": "low"
-    },
-    {
-      "name": "Devin (Cognition AI)",
-      "website": "https://cognition-labs.com",
-      "known_info": "AI software engineer",
-      "priority": "low"
-    },
-    {
-      "name": "Harvey",
-      "website": "https://harvey.ai",
-      "known_info": "Legal AI agents",
-      "priority": "medium"
-    },
-    {
-      "name": "Glean",
-      "website": "https://glean.com",
-      "known_info": "Enterprise AI assistant",
-      "priority": "medium"
+      "category": "Global Open-Source / Platform Players",
+      "competitors": [
+        {
+          "name": "LangChain / LangSmith",
+          "website": "https://langchain.com",
+          "known_info": "Open-source agent framework",
+          "priority": "MEDIUM",
+          "cis_presence": "Available everywhere (open-source)",
+          "research_focus": "Used by CIS companies? Barrier to entry?"
+        },
+        {
+          "name": "AutoGPT / AgentGPT",
+          "website": "https://agentgpt.reworkd.ai",
+          "known_info": "Open-source autonomous agents",
+          "priority": "LOW",
+          "cis_presence": "Available (open-source)",
+          "research_focus": "Threat level? Enterprise adoption?"
+        },
+        {
+          "name": "n8n / Make / Zapier",
+          "website": "https://n8n.io",
+          "known_info": "Workflow automation platforms",
+          "priority": "LOW",
+          "cis_presence": "n8n open-source accessible",
+          "research_focus": "Moving into AI agents? Competition?"
+        }
+      ]
     }
   ],
 
