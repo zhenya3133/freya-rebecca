@@ -1,0 +1,5 @@
+# Legacy files with false-positive secrets
+.github/workflows/smoke.yml
+apps/web/package-lock.json
+audit-foundation.txt
+diff_report/
