@@ -1,5 +1,0 @@
-{"q":"event loop microtask","must_url_substr":"developer.mozilla.org/en-US/docs/Web/JavaScript/Event_loop","domainAllow":["developer.mozilla.org"]}
-{"q":"console.time usage","must_url_substr":"developer.mozilla.org/en-US/docs/Web/API/console/time","domainAllow":["developer.mozilla.org"]}
-{"q":"console.table example","must_url_substr":"developer.mozilla.org/en-US/docs/Web/API/Console/table","domainAllow":["developer.mozilla.org"]}
-{"q":"openai cookbook examples","must_url_substr":"github.com/openai/openai-cookbook","domainAllow":["github.com"]}
-{"q":"Mastering AI Agents","must_url_substr":"file://"}
