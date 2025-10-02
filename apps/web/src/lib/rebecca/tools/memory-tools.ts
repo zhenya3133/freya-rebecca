@@ -50,8 +50,9 @@ export const searchSemanticMemoryTool: Tool = {
   ],
 };
 
-async function searchSemanticMemoryHandler(params: Record<string, any>) {
-  const memory = new MemoryManager();
+async function searchSemanticMemoryHandler(params: Record<string, any>, context?: { namespace?: string }) {
+  const namespace = context?.namespace || "rebecca";
+  const memory = new MemoryManager(namespace);
   const results = await memory.searchKnowledge(
     params.query,
     params.limit || 5,
@@ -97,8 +98,9 @@ export const searchEpisodicMemoryTool: Tool = {
   ],
 };
 
-async function searchEpisodicMemoryHandler(params: Record<string, any>) {
-  const memory = new MemoryManager();
+async function searchEpisodicMemoryHandler(params: Record<string, any>, context?: { namespace?: string }) {
+  const namespace = context?.namespace || "rebecca";
+  const memory = new MemoryManager(namespace);
   const results = await memory.searchEpisodes(params.query, params.limit || 5);
   return results;
 }
@@ -150,8 +152,9 @@ export const saveKnowledgeTool: Tool = {
   ],
 };
 
-async function saveKnowledgeHandler(params: Record<string, any>) {
-  const memory = new MemoryManager();
+async function saveKnowledgeHandler(params: Record<string, any>, context?: { namespace?: string }) {
+  const namespace = context?.namespace || "rebecca";
+  const memory = new MemoryManager(namespace);
   const id = await memory.saveKnowledge({
     content: params.content,
     kind: params.kind as any,
@@ -178,8 +181,9 @@ export const getRecentEpisodesTool: Tool = {
   returns: "Array of recent episodes ordered by timestamp",
 };
 
-async function getRecentEpisodesHandler(params: Record<string, any>) {
-  const memory = new MemoryManager();
+async function getRecentEpisodesHandler(params: Record<string, any>, context?: { namespace?: string }) {
+  const namespace = context?.namespace || "rebecca";
+  const memory = new MemoryManager(namespace);
   const results = await memory.getRecentEpisodes(params.limit || 10);
   return results;
 }
@@ -207,8 +211,9 @@ export const getKnowledgeByKindTool: Tool = {
   returns: "Array of knowledge items of the specified kind",
 };
 
-async function getKnowledgeByKindHandler(params: Record<string, any>) {
-  const memory = new MemoryManager();
+async function getKnowledgeByKindHandler(params: Record<string, any>, context?: { namespace?: string }) {
+  const namespace = context?.namespace || "rebecca";
+  const memory = new MemoryManager(namespace);
   const results = await memory.getKnowledgeByKind(params.kind as any, params.limit || 20);
   return results;
 }
