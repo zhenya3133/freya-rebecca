@@ -1,0 +1,260 @@
+{
+  "task_type": "deep_research",
+  "research_title": "AI Agents for Business Automation - Competitive Landscape Analysis",
+  "research_objective": "Identify all competitors building AI agent solutions for business automation, analyze their approaches, find gaps in the market, and validate our unique 'clone + adapt' strategy",
+  
+  "research_questions": [
+    {
+      "id": 1,
+      "question": "Who are the top 20-30 startups/companies building AI agent solutions for business automation?",
+      "sub_questions": [
+        "What is their funding status (amount raised, investors, stage)?",
+        "When were they founded?",
+        "How many employees do they have?",
+        "What is their current revenue/ARR (if public)?",
+        "How many customers do they have?"
+      ],
+      "expected_output": "Table with company name, website, funding, founding date, team size, customers, revenue (if known)"
+    },
+    {
+      "id": 2,
+      "question": "What is each competitor's core product offering and approach?",
+      "sub_questions": [
+        "Do they provide a platform (DIY) or done-for-you solution?",
+        "What industries/use cases do they target?",
+        "How do they train/customize agents for clients?",
+        "Do they use proprietary models or OpenAI/Anthropic APIs?",
+        "What is their deployment model (cloud, on-prem, hybrid)?"
+      ],
+      "expected_output": "Detailed description of each competitor's product strategy and technical approach"
+    },
+    {
+      "id": 3,
+      "question": "Does ANY competitor use a 'master agent + clone + adapt' approach?",
+      "sub_questions": [
+        "Do they train universal master agents once and then clone them?",
+        "Do they use transfer learning / LoRA adapters for customization?",
+        "Do they leverage data from one client to improve others (network effects)?",
+        "How long does it take them to deploy a new client?",
+        "What is their reported cost per client deployment?"
+      ],
+      "expected_output": "YES/NO answer with evidence for each competitor, focusing on those who might be using similar approaches"
+    },
+    {
+      "id": 4,
+      "question": "What are the pricing models in the market?",
+      "sub_questions": [
+        "What are typical setup/implementation fees?",
+        "What are monthly/annual subscription prices?",
+        "Do they charge per agent, per user, or flat fee?",
+        "What is the range (low-end to high-end)?",
+        "Are there any transparent pricing pages we can reference?"
+      ],
+      "expected_output": "Pricing analysis with ranges and models used"
+    },
+    {
+      "id": 5,
+      "question": "What are the common customer pain points and complaints?",
+      "sub_questions": [
+        "What do customers say in reviews (G2, Capterra, etc)?",
+        "What are the most common feature requests?",
+        "Where do competitors struggle (based on customer feedback)?",
+        "What are churn reasons (if publicly discussed)?",
+        "What do sales/marketing materials reveal about competitive weaknesses?"
+      ],
+      "expected_output": "Summary of market pain points and gaps in current offerings"
+    },
+    {
+      "id": 6,
+      "question": "How do competitors go to market?",
+      "sub_questions": [
+        "What are their primary marketing channels?",
+        "Do they have a sales team or product-led growth?",
+        "What is their messaging/positioning?",
+        "Who are their target customers (SMB, mid-market, enterprise)?",
+        "What is their content strategy (blog, case studies, etc)?"
+      ],
+      "expected_output": "GTM strategy analysis for top 5-10 competitors"
+    },
+    {
+      "id": 7,
+      "question": "What is the technical sophistication level?",
+      "sub_questions": [
+        "Do they use fine-tuned models or just API calls?",
+        "Do they have proprietary training pipelines?",
+        "How much AI/ML expertise do they appear to have (based on team, blog posts, patents)?",
+        "Do they use reinforcement learning or other advanced techniques?",
+        "What is their tech stack (if known)?"
+      ],
+      "expected_output": "Technical maturity assessment of key competitors"
+    },
+    {
+      "id": 8,
+      "question": "What are the emerging trends and future directions?",
+      "sub_questions": [
+        "What are recent product launches/announcements?",
+        "Where are competitors investing (based on job postings)?",
+        "What are analysts/VCs saying about the space?",
+        "Are there any acquisitions or consolidation happening?",
+        "What adjacent markets are being explored?"
+      ],
+      "expected_output": "Market trends and future predictions"
+    }
+  ],
+
+  "key_competitors_to_investigate": [
+    {
+      "name": "Sierra",
+      "website": "https://sierra.ai",
+      "known_info": "Raised $110M, focused on customer service agents",
+      "priority": "high"
+    },
+    {
+      "name": "Decagon",
+      "website": "https://decagon.ai",
+      "known_info": "Raised $35M, support automation",
+      "priority": "high"
+    },
+    {
+      "name": "Embra",
+      "website": "https://embra.ai",
+      "known_info": "Raised $5M, personal AI assistant",
+      "priority": "medium"
+    },
+    {
+      "name": "Dust",
+      "website": "https://dust.tt",
+      "known_info": "Raised $16M, team AI agents",
+      "priority": "high"
+    },
+    {
+      "name": "Relevance AI",
+      "website": "https://relevanceai.com",
+      "known_info": "Raised $15M, agent building platform",
+      "priority": "high"
+    },
+    {
+      "name": "Agent.ai",
+      "website": "https://agent.ai",
+      "known_info": "Sales automation focus",
+      "priority": "medium"
+    },
+    {
+      "name": "Factory",
+      "website": "https://factory.ai",
+      "known_info": "Coding agents",
+      "priority": "low"
+    },
+    {
+      "name": "Devin (Cognition AI)",
+      "website": "https://cognition-labs.com",
+      "known_info": "AI software engineer",
+      "priority": "low"
+    },
+    {
+      "name": "Harvey",
+      "website": "https://harvey.ai",
+      "known_info": "Legal AI agents",
+      "priority": "medium"
+    },
+    {
+      "name": "Glean",
+      "website": "https://glean.com",
+      "known_info": "Enterprise AI assistant",
+      "priority": "medium"
+    }
+  ],
+
+  "additional_research_areas": [
+    "AI agent frameworks (LangChain, AutoGPT, BabyAGI) - are they being used by competitors?",
+    "Open-source alternatives (AgentGPT, etc) - threat or opportunity?",
+    "Large incumbents (Microsoft Copilot, Salesforce Einstein, etc) - how are they approaching this?",
+    "Academic research on multi-agent systems and transfer learning for agents",
+    "Patents filed related to AI agent cloning/adaptation"
+  ],
+
+  "output_format": {
+    "format": "comprehensive_report",
+    "structure": [
+      {
+        "section": "Executive Summary",
+        "content": "2-3 page overview of findings, key insights, and strategic recommendations"
+      },
+      {
+        "section": "Competitive Landscape Matrix",
+        "content": "Detailed table comparing all competitors across key dimensions"
+      },
+      {
+        "section": "Deep Dives",
+        "content": "5-10 pages on top 5-7 competitors with screenshots, product analysis, customer reviews"
+      },
+      {
+        "section": "Gap Analysis",
+        "content": "What is NOT being done that we could do? Where are the whitespace opportunities?"
+      },
+      {
+        "section": "Validation of Our Approach",
+        "content": "Specific evidence that 'clone + adapt' approach is unique and defensible"
+      },
+      {
+        "section": "Strategic Recommendations",
+        "content": "Based on research, what should we prioritize? What should we avoid? How should we position?"
+      },
+      {
+        "section": "Appendix",
+        "content": "Full list of all 30+ competitors, sources, and raw data"
+      }
+    ],
+    "deliverables": [
+      "PDF report (30-50 pages)",
+      "Excel/CSV with competitor matrix",
+      "Key quotes and screenshots",
+      "List of sources with links"
+    ]
+  },
+
+  "research_constraints": {
+    "time_limit": "48-72 hours",
+    "depth": "comprehensive - go deep, not just surface-level",
+    "sources": [
+      "Company websites and product pages",
+      "Crunchbase, PitchBook, AngelList for funding data",
+      "G2, Capterra, TrustRadius for reviews",
+      "LinkedIn for team size and hiring",
+      "Blog posts, case studies, whitepapers",
+      "News articles, press releases",
+      "Patent databases (Google Patents, USPTO)",
+      "Academic papers (arXiv, Google Scholar)",
+      "Reddit, HackerNews, Twitter/X discussions",
+      "YouTube demos and presentations",
+      "Podcast interviews with founders"
+    ],
+    "quality_over_speed": true,
+    "verify_facts": "Cross-reference important claims from multiple sources"
+  },
+
+  "critical_success_factors": [
+    "We MUST know if anyone is doing 'clone + adapt' - this is make-or-break for uniqueness",
+    "Pricing intelligence is crucial for our go-to-market strategy",
+    "Understanding technical depth helps us assess competitive moat",
+    "Customer pain points reveal where we can differentiate",
+    "GTM strategies inform our own launch approach"
+  ],
+
+  "special_instructions": [
+    "Be skeptical of marketing claims - look for evidence",
+    "Pay attention to what competitors DON'T say (reveals weaknesses)",
+    "Look for pivots - some may have changed strategy recently",
+    "Founder backgrounds matter - prior experience shapes approach",
+    "Recent funding changes urgency and competitive dynamics",
+    "If you find a competitor doing clone+adapt, FLAG IT IMMEDIATELY with detailed evidence"
+  ],
+
+  "success_criteria": {
+    "completeness": "Covered all 30+ relevant competitors",
+    "depth": "Deep analysis of top 10, at least 5-10 pages per major player",
+    "actionability": "Clear strategic recommendations we can act on",
+    "validation": "Definitive answer on uniqueness of our approach",
+    "sources": "All claims backed by credible sources with links"
+  }
+}
