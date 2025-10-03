@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "skipLibCheck": true,
+    "incremental": false,
+    "types": []
+  },
+  "exclude": [
+    "node_modules",
+    "scripts",
+    ".next",
+    "src/app/api/admin/**",
+    "src/app/api/ingest/**",
+    "src/app/api/maint/**",
+    "src/app/api/rag/**",
+    "src/app/api/retrieve/**",
+    "src/lib/retriever_v2.ts",
+    "src/lib/rag-core.ts"
+  ]
+}

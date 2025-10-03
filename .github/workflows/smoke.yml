@@ -1,0 +1,98 @@
+name: Smoke
+on:
+  push:
+    branches: [ main, develop, feature/**, feat/**, fix/** ]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+
+    services:
+      pg:
+        image: pgvector/pgvector:pg16
+        ports: ['5432:5432']
+        env:
+          POSTGRES_USER: rebecca
+          POSTGRES_PASSWORD: rebecca
+          POSTGRES_DB: rebecca
+        options: >-
+          --health-cmd "pg_isready -U rebecca -d rebecca"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      CI: true
+      DATABASE_URL: postgres://rebecca:rebecca@localhost:5432/rebecca?sslmode=disable
+      X_ADMIN_KEY: test-admin
+      NEXT_PUBLIC_BASE_URL: http://localhost:3000
+      NODE_OPTIONS: --max-old-space-size=4096
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          # кэшируем ТОЛЬКО корневой lockfile — работаем в режиме single-lock
+          cache-dependency-path: package-lock.json
+
+      # Гарантируем, что не появится второй lockfile в apps/web
+      - name: Enforce single lockfile
+        run: rm -f apps/web/package-lock.json
+
+      # Корневые зависимости проекта (single lock)
+      - name: Install deps (root)
+        run: npm install --no-audit --no-fund
+
+      # Локальные зависимости фронта без генерации своего lockfile
+      - name: Install deps (apps/web)
+        working-directory: apps/web
+        run: npm install --no-audit --no-fund --no-package-lock
+
+      - name: Init DB schema
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client jq
+          psql "$DATABASE_URL" -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+          psql "$DATABASE_URL" <<'SQL'
+          CREATE TABLE IF NOT EXISTS docs (
+            id bigserial PRIMARY KEY, ns text NOT NULL, slot text NOT NULL, source_id text NOT NULL,
+            title text, url text, meta jsonb DEFAULT '{}'::jsonb, created_at timestamptz DEFAULT now()
+          );
+          CREATE TABLE IF NOT EXISTS sources (
+            id bigserial PRIMARY KEY, ns text NOT NULL, slot text NOT NULL, source_id text UNIQUE NOT NULL,
+            url text, meta jsonb DEFAULT '{}'::jsonb, created_at timestamptz DEFAULT now()
+          );
+          CREATE TABLE IF NOT EXISTS chunks (
+            id bigserial PRIMARY KEY,
+            ns text NOT NULL, slot text NOT NULL, source_id text, chunk_no integer,
+            content text NOT NULL, content_hash text,
+            url text, title text, snippet text,
+            published_at timestamptz, updated_at timestamptz DEFAULT now(),
+            source_type text, kind text,
+            metadata jsonb DEFAULT '{}'::jsonb,
+            embedding vector(1536),
+            created_at timestamptz DEFAULT now(),
+            UNIQUE (ns,slot,source_id,chunk_no)
+          );
+          CREATE INDEX IF NOT EXISTS idx_chunks_ns_slot ON chunks(ns,slot);
+          SQL
+
+      - name: Typecheck
+        run: npx -y -p typescript tsc -p apps/web/tsconfig.ci.json --noEmit
+
+      - name: Build & Start API
+        working-directory: apps/web
+        run: |
+          npm run build
+          npm run start &
+          echo "waiting for API..."
+          for i in {1..60}; do curl -sSf http://localhost:3000/api/db-ping && break || sleep 2; done
+
+      - name: Smoke PDF
+        run: |
+          chmod +x scripts/smoke_pdf.sh
+          BASE=http://localhost:3000 NS=rebecca/army/refs SLOT=staging X_ADMIN_KEY=$X_ADMIN_KEY ./scripts/smoke_pdf.sh
