@@ -75,7 +75,7 @@ export async function suggestNamespace(input: SuggestInput): Promise<SuggestResu
   // Порог уверенности: эмпирически 0.78 — хороший «auto-route».
   const threshold = 0.78;
   let ns = (filtered[0]?.key) ?? "sandbox";
-  let decided = (filtered[0]?.score ?? 0) >= threshold;
+  const decided = (filtered[0]?.score ?? 0) >= threshold;
 
   // если не уверены — отправляем в sandbox
   if (!decided) ns = "sandbox";
